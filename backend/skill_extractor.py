@@ -1,139 +1,182 @@
 """
 skill_extractor.py
 ------------------
-Builds the unified skill library, extracts skills from text, and manages TF-IDF.
+Skill extraction pipeline — LLM only.
 
-Optimisations
--------------
-- Combined single regex (OR of all skills) replaces individual per-skill re.search calls → 54x faster
-- Skills sorted longest-first so multi-word phrases ("machine learning") match before substrings ("learning")
-- Batch TF-IDF transform (vectorizer.transform(list)) instead of per-skill loops → 32x faster
-- FULL_SKILL_LIBRARY and _SKILL_PATTERN are module-level singletons, built once at import
-- frozenset lookup for O(1) membership checks
+The LLM defines everything (skill, category, proficiency, confidence).
+No handcoded skill lists. No taxonomy. No rules. No fallback.
+
+If no LLM backend is reachable, extraction raises a RuntimeError.
 """
 
-from __future__ import annotations
 import re
-from typing import Optional
-
-import pandas as pd
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from scipy.sparse import csr_matrix
-
-from taxonomy_adapter import (
-    get_all_skills,
-    get_job_benchmark,
-    build_weighted_benchmark_text,
-    get_tech_skills,
-    find_job_title,
-)
-from config import BENCHMARK_TOP_N, MIN_SKILL_WEIGHT
+from collections import defaultdict, Counter
+from llm_extractor import extract_skills_llm
 
 
-# ── Skill library — built once at import ─────────────────────────────────────
-FULL_SKILL_LIBRARY: list[str] = get_all_skills(min_weight=0.0)
-FULL_SKILL_SET:     frozenset  = frozenset(FULL_SKILL_LIBRARY)   # O(1) membership
+# ════════════════════════════════════════════════════════════════════
+# Experience years calculator
+# ════════════════════════════════════════════════════════════════════
+
+MONTH_MAP = {
+    "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+    "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+    "january":1,"february":2,"march":3,"april":4,
+    "june":6,"july":7,"august":8,"september":9,
+    "october":10,"november":11,"december":12,
+}
+
+def _parse_date(s: str):
+    import datetime
+    if not s:
+        return None
+    s = s.strip().lower()
+    m = re.match(r"([a-z]+)\s+(\d{4})", s)
+    if m:
+        return int(m.group(2)) + MONTH_MAP.get(m.group(1), 6) / 12.0
+    m = re.match(r"(\d{4})", s)
+    if m:
+        return float(m.group(1))
+    if "present" in s or "current" in s:
+        return float(datetime.date.today().year)
+    return None
 
 
-# ── Precompiled combined regex ────────────────────────────────────────────────
-# Sort longest first so multi-word phrases ("machine learning") beat substrings ("learning")
-_sorted_skills = sorted(FULL_SKILL_LIBRARY, key=len, reverse=True)
-_SKILL_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(s) for s in _sorted_skills) + r")\b",
-    re.IGNORECASE,
-)
+def _compute_experience(experience: list) -> dict:
+    import datetime
+    current_year = float(datetime.date.today().year)
+    total_months = 0
+    years_per_title = {}
 
+    for job in experience:
+        start = _parse_date(job.get("start_date", ""))
+        end   = _parse_date(job.get("end_date",   "")) or current_year
+        if start and end and end > start:
+            yrs = end - start
+            total_months += yrs * 12
+            title = job.get("title", "")
+            if title:
+                years_per_title[title] = round(yrs, 1)
 
-def extract_skills(
-    text: str,
-    skill_library: Optional[list[str]] = None,
-) -> list[str]:
-    """
-    Return a sorted list of skills found in *text*.
-
-    Uses a single combined OR-regex for ~54x speedup over per-skill re.search.
-    If a custom skill_library is provided it compiles a one-off pattern for it;
-    otherwise uses the module-level precompiled pattern.
-    """
-    if not isinstance(text, str) or not text.strip():
-        return []
-
-    if skill_library is None or frozenset(skill_library) == FULL_SKILL_SET:
-        matches = _SKILL_PATTERN.findall(text.lower())
+    total = round(total_months / 12, 1)
+    if total < 2:
+        seniority = "Junior (0–2 yrs)"
+    elif total < 5:
+        seniority = "Mid-Level (2–5 yrs)"
+    elif total < 10:
+        seniority = "Senior (5–10 yrs)"
     else:
-        custom_sorted = sorted(skill_library, key=len, reverse=True)
-        pat = re.compile(
-            r"\b(" + "|".join(re.escape(s) for s in custom_sorted) + r")\b",
-            re.IGNORECASE,
+        seniority = "Expert (10+ yrs)"
+
+    return {
+        "total_years":     total,
+        "years_per_title": years_per_title,
+        "seniority_level": seniority,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# Domain classifier — derived from LLM categories, no hardcoding
+# ════════════════════════════════════════════════════════════════════
+
+def _classify_domains(skills: list) -> list:
+    """
+    Derive domain expertise ranking purely from LLM-assigned categories.
+    Returns top 5 domains ordered by number of skills in each.
+    """
+    cat_counts = Counter(s["category"] for s in skills)
+    return [cat for cat, _ in cat_counts.most_common(5)]
+
+
+# ════════════════════════════════════════════════════════════════════
+# MAIN PIPELINE
+# ════════════════════════════════════════════════════════════════════
+
+def extract_all_skills(parsed_resume: dict) -> dict:
+    """
+    Extract skills from a parsed resume using the LLM.
+
+    Raises RuntimeError if no LLM backend is reachable.
+
+    Returns
+    -------
+    {
+        skills             : list[dict] — all skills with full metadata
+        skills_by_category : dict       — { category: [skill, ...] }
+        experience_info    : dict       — { total_years, seniority, ... }
+        domains            : list[str]  — top domains by skill count
+        languages          : list[str]
+        confidence_scores  : dict       — { skill: float }
+        reasoning_trace    : list[dict] — full audit log
+        backend_used       : str
+        model_used         : str
+    }
+    """
+    raw_text   = parsed_resume.get("raw_text", "")
+    experience = parsed_resume.get("experience", [])
+
+    # ── LLM extraction ────────────────────────────────────────────────
+    llm_result = extract_skills_llm(raw_text)
+
+    if not llm_result["llm_available"]:
+        raise RuntimeError(
+            f"LLM extraction failed: {llm_result.get('error', 'Ollama unavailable')}. "
+            "Make sure Ollama is running: ollama serve"
         )
-        matches = pat.findall(text.lower())
 
-    return sorted(set(m.lower() for m in matches))
+    skills       = llm_result["skills"]
+    backend_used = llm_result["backend_used"]
+    model_used   = llm_result["model_used"]
 
+    # ── Reasoning trace ───────────────────────────────────────────────
+    reasoning_trace = [
+        {
+            "layer":       "llm",
+            "skill":       s["skill"],
+            "category":    s["category"],
+            "proficiency": s["proficiency"],
+            "confidence":  s["confidence"],
+            "reasoning":   s["reasoning"],
+            "backend":     backend_used,
+            "model":       model_used,
+        }
+        for s in skills
+    ]
 
-# ── Weighted benchmark helpers ────────────────────────────────────────────────
+    # ── Filter hallucinations — drop skills with no real reasoning ────────
+    INVALID_REASONING = {"", "not specified", "n/a", "none", "not mentioned"}
+    skills = [
+        s for s in skills
+        if s.get("reasoning", "").strip().lower() not in INVALID_REASONING
+    ]
 
-def get_weighted_benchmark(
-    job_title: str,
-    top_n: int = BENCHMARK_TOP_N,
-    min_weight: float = MIN_SKILL_WEIGHT,
-) -> dict[str, float]:
-    raw = get_job_benchmark(job_title, top_n=top_n)
-    return {k: v for k, v in raw.items() if v >= min_weight}
+    # ── Dedup ─────────────────────────────────────────────────────────
+    seen, deduped = set(), []
+    for s in skills:
+        if s["skill"] not in seen:
+            seen.add(s["skill"])
+            deduped.append(s)
+    skills = deduped
 
+    # ── Group by category ─────────────────────────────────────────────
+    by_category = defaultdict(list)
+    for s in skills:
+        by_category[s["category"]].append(s["skill"])
 
-def build_benchmark_text(job_title: str, top_n: int = BENCHMARK_TOP_N) -> str:
-    return build_weighted_benchmark_text(job_title, top_n=top_n)
+    # ── Experience info ───────────────────────────────────────────────
+    experience_info = _compute_experience(experience)
 
+    # ── Domains ───────────────────────────────────────────────────────
+    domains = _classify_domains(skills)
 
-# ── TF-IDF vectorizer management ─────────────────────────────────────────────
-
-def build_and_fit_vectorizer(
-    resume_df: pd.DataFrame,
-    job_description_text: str = "",
-    skill_library: Optional[list[str]] = None,
-    resume_col: str = "Resume_str",
-    extra_benchmark_texts: Optional[list[str]] = None,
-) -> TfidfVectorizer:
-    """
-    Fit a TF-IDF vectorizer on the combined corpus:
-      - all resume texts
-      - job-description PDF text
-      - weighted benchmark texts (O*NET-scaled skill repetition)
-      - full skill library terms
-
-    ngram_range=(1,2) captures "machine learning", "deep learning" as single tokens.
-    sublinear_tf=True log-scales term frequencies to reduce repetition inflation.
-    """
-    library = skill_library or FULL_SKILL_LIBRARY
-    corpus: list[str] = (
-        resume_df[resume_col].fillna("").tolist()
-        + ([job_description_text] if job_description_text else [])
-        + (extra_benchmark_texts or [])
-        + library
-    )
-    vectorizer = TfidfVectorizer(
-        stop_words="english",
-        sublinear_tf=True,
-        ngram_range=(1, 2),
-        min_df=1,
-    )
-    vectorizer.fit(corpus)
-    return vectorizer
-
-
-def precompute_skill_vectors(
-    vectorizer: TfidfVectorizer,
-    skill_library: Optional[list[str]] = None,
-) -> dict[str, csr_matrix]:
-    """
-    Pre-compute TF-IDF sparse vectors for every skill using a single batch
-    transform call (32x faster than looping vectorizer.transform([skill])).
-
-    Returns dict  skill_string → sparse row vector (1 × vocab_size)
-    """
-    library = skill_library or FULL_SKILL_LIBRARY
-    # One batch call — orders of magnitude faster than individual transforms
-    matrix = vectorizer.transform(library)   # shape: (n_skills × vocab)
-    return {skill: matrix[i] for i, skill in enumerate(library)}
+    return {
+        "skills":             skills,
+        "skills_by_category": dict(by_category),
+        "experience_info":    experience_info,
+        "domains":            domains,
+        "languages":          parsed_resume.get("languages", []),
+        "confidence_scores":  {s["skill"]: s["confidence"] for s in skills},
+        "reasoning_trace":    reasoning_trace,
+        "backend_used":       backend_used,
+        "model_used":         model_used,
+    }
