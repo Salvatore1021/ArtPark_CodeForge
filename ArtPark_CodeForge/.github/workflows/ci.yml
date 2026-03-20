@@ -1,0 +1,40 @@
+﻿name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest
+      - name: Syntax check
+        run: |
+          python -m py_compile backend/parsers.py
+          python -m py_compile backend/skill_extractor.py
+          python -m py_compile backend/gap_analyzer.py
+          python -m py_compile backend/pathway_engine.py
+          python -m py_compile backend/knowledge_tracing.py
+          python -m py_compile backend/metrics.py
+          python -m py_compile backend/main.py
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t aurora-backend ./backend
+      - run: docker build -t aurora-frontend ./frontend

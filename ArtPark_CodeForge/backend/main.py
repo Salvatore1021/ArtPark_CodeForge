@@ -11,13 +11,20 @@ Endpoints:
   GET  /catalog/{course_id}     — Return single course details
 """
 
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 from gap_analyzer import compute_skill_gap
 from metrics import evaluate_pathway
+from parsers import extract_text
 from pathway_engine import generate_learning_pathway, load_course_catalog
-
-# Import the new NLP pipeline modules
-from resume_parser import parse_resume_html, parse_resume_plaintext
-from skill_extractor import extract_all_skills
+from skill_extractor import extract_skills_from_jd, extract_skills_from_resume
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -235,63 +242,14 @@ async def analyze(
 
 
 async def _extract_both(resume_text: str, jd_text: str):
-    """
-    Adapter function: Runs the NLP pipeline and maps its complex output 
-    to the simple JSON schema expected by the Gap Analyzer.
-    """
-    # 1. Parse text into sections using the NLP pipeline's parser
-    resume_sections = parse_resume_plaintext(resume_text)
-    jd_sections = parse_resume_plaintext(jd_text)
-    
-    # 2. Extract skills using the 5-layer NLP pipeline
-    # (Passing a dummy job title list and education list since we only have raw text here)
-    raw_resume_profile = extract_all_skills(resume_sections, ["Software Engineer"], [])
-    raw_jd_profile = extract_all_skills(jd_sections, ["Target Role"], [])
-
-    # 3. Helper to map 0-3 NLP proficiency to 1-5 System proficiency
-    def map_proficiency(nlp_score):
-        mapping = {0: 2, 1: 3, 2: 4, 3: 5}
-        return mapping.get(nlp_score, 3)
-
-    # 4. Format Resume Skills
-    formatted_resume_skills = []
-    for skill in raw_resume_profile.get("skills", []) + raw_resume_profile.get("inferred_skills", []):
-        formatted_resume_skills.append({
-            "skill_name": skill["skill"],
-            "category": skill["category"],
-            "proficiency_level": map_proficiency(skill.get("proficiency", {}).get("score", 1)),
-            "evidence": skill.get("reasoning", "")
-        })
-
-    # 5. Format JD Skills
-    formatted_jd_skills = []
-    for skill in raw_jd_profile.get("skills", []) + raw_jd_profile.get("inferred_skills", []):
-        formatted_jd_skills.append({
-            "skill_name": skill["skill"],
-            "category": skill["category"],
-            "required_level": map_proficiency(skill.get("proficiency", {}).get("score", 1)),
-            "is_mandatory": True, # Defaulting to true for NLP extraction
-            "context": skill.get("reasoning", "")
-        })
-
-    # 6. Build final dictionaries matching the old LLM schema
-    resume_data = {
-        "candidate_name": "Candidate",
-        "years_total_experience": raw_resume_profile.get("experience_info", {}).get("total_years", 0),
-        "current_role": "Unknown",
-        "skills": formatted_resume_skills,
-        "extraction_method": "nlp_pipeline"
-    }
-
-    jd_data = {
-        "job_title": "Target Role",
-        "department": "Engineering",
-        "seniority": "mid",
-        "skills": formatted_jd_skills,
-        "extraction_method": "nlp_pipeline"
-    }
-
+    """Run resume + JD extraction concurrently."""
+    import asyncio
+    resume_task = asyncio.create_task(extract_skills_from_resume(resume_text))
+    jd_task = asyncio.create_task(extract_skills_from_jd(jd_text))
+    resume_data = await resume_task
+    jd_data = await jd_task
     return resume_data, jd_data
+
 
 # ---------------------------------------------------------------------------
 # Error handlers
