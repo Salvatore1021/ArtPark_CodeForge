@@ -136,18 +136,38 @@ analyzeBtn.addEventListener("click", async () => {
     formData.append("resume", resumeFile);
     formData.append("job_description", jdFile);
 
-    const resp = await fetch(`${API_BASE}/analyze`, {
-      method: "POST",
-      body: formData,
-    });
+    // Add default category required by the new visual endpoint
+    formData.append("category", "ENGINEER");
 
-    if (!resp.ok) {
-      const errData = await resp.json().catch(() => ({}));
-      throw new Error(errData.detail || `Server error ${resp.status}`);
+    // Fetch from BOTH endpoints simultaneously
+    const [standardResp, visualResp] = await Promise.all([
+      fetch(`${API_BASE}/analyze`, { method: "POST", body: formData }),
+      fetch(`${API_BASE}/analyze/visual`, { method: "POST", body: formData })
+    ]);
+
+    if (!standardResp.ok) {
+      const errData = await standardResp.json().catch(() => ({}));
+      throw new Error(errData.detail || `Standard API error ${standardResp.status}`);
+    }
+    if (!visualResp.ok) {
+      const errData = await visualResp.json().catch(() => ({}));
+      throw new Error(errData.detail || `Visual API error ${visualResp.status}`);
     }
 
-    analysisResult = await resp.json();
+    analysisResult = await standardResp.json();
+    const visualResult = await visualResp.json();
+
+    // 1. Render original UI
     renderResults(analysisResult);
+
+    // 2. Render new Matplotlib Dashboard
+    const visualContainer = document.getElementById("visual-results-container");
+    const dashboardImg = document.getElementById("dashboard-image");
+    
+    if (visualContainer && dashboardImg && visualResult.dashboard_base64) {
+      visualContainer.style.display = "block";
+      dashboardImg.src = "data:image/png;base64," + visualResult.dashboard_base64;
+    }
 
   } catch (err) {
     showError(err.message || "Network error — is the backend running?");

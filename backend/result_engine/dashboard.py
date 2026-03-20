@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import networkx as nx
 import pandas as pd
+import io
+import base64
 
 from dependency_graph import get_subgraph_for_skills
 from roadmap_builder import build_roadmap
@@ -166,11 +168,13 @@ def generate_dashboard(
     )
 
     # ── Save / Show ───────────────────────────────────────────────────────────
-    if save_path:
-        fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
-        print(f"[Dashboard] Saved to {save_path}")
-
-    if show:
-        plt.show()
-
-    return fig
+    buf = io.BytesIO()
+    # Save the figure to the in-memory buffer
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    plt.close(fig) # Free up memory
+    
+    buf.seek(0)
+    # Encode buffer to base64 string
+    img_base64 = base64.b64encode(buf.read()).decode("utf-8")
+    
+    return img_base64
