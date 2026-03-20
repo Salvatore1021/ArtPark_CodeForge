@@ -10,9 +10,16 @@ Endpoints:
   GET  /catalog                 — Return full course catalog
   GET  /catalog/{course_id}     — Return single course details
 """
+import logging
+import os
 import tempfile
-from fastapi import Form
+import time
+from contextlib import asynccontextmanager
+
 import pandas as pd
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Updated imports pointing to result_engine
 from result_engine.pdf_parser import extract_text_from_pdf as vedant_extract, parse_resume_pdf, resume_profile_to_dataframe_row
