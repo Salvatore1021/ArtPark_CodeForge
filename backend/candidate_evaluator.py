@@ -11,7 +11,7 @@ Scoring model
    Each group gets a sub-fit score (confidence-weighted average).
    The two sub-scores are blended by the category ratio:
 
-     TECH:       80% hard × hard_fit + 20% soft × soft_fit
+     TECH:       95% hard × hard_fit + 05% soft × soft_fit
      NON_TECH:   70% hard × hard_fit + 30% soft × soft_fit
      MANAGEMENT: 50% hard × hard_fit + 50% soft × soft_fit
      HEALTHCARE: 65% hard × hard_fit + 35% soft × soft_fit
@@ -48,6 +48,19 @@ from skill_classifier import (
     get_ratio,
 )
 
+from enhanced_taxonomy import ENHANCED_TAXONOMY_DATA
+
+DEFAULT_SKILL_WEIGHTS = {}
+for domain, roles in ENHANCED_TAXONOMY_DATA.items():
+    if isinstance(roles, dict):
+        for role, data in roles.items():
+            if isinstance(data, dict) and "WEIGHTS" in data:
+                for skill, weight in data["WEIGHTS"].items():
+                    skill_lower = skill.lower()
+                    if skill_lower not in DEFAULT_SKILL_WEIGHTS:
+                        DEFAULT_SKILL_WEIGHTS[skill_lower] = weight
+                    else:
+                        DEFAULT_SKILL_WEIGHTS[skill_lower] = max(DEFAULT_SKILL_WEIGHTS[skill_lower], weight)
 
 def determine_grade(score: float) -> str:
     for grade, threshold in sorted(
@@ -72,34 +85,37 @@ def evaluate_candidate(
     skill_vectors: dict | None = None,
     category: str | None = None,
     resume_col: str = "Resume_str",
+    jd_skills: set[str] | list[str] | None = None,
 ) -> dict:
     """
-    Evaluate a single candidate.
-
-    Returns
-    -------
-    dict with keys:
-        ID, Category, Job_Title, Category_Type, Ratio_Label,
-        Hard_Fit, Soft_Fit, Split_Weighted_Fit,
-        Weighted_Cosine, Composite_Score,
-        Confidence_Scores, Split_Details,
-        Grade, Pathway_Depth, Duration,
-        Gaps, Gap_Weights, Extracted_Skills,
-        _cand_vec  (internal — pop before saving)
+    Evaluate a single candidate. Dynamically adjusts benchmark weights 
+    if jd_skills are provided.
     """
     cand_id      = candidate_row.get("ID", 0)
     raw_category = category or candidate_row.get("Category", "UNKNOWN")
     job_title    = resolve_job_title(str(raw_category))
     resume_text  = str(candidate_row.get(resume_col, ""))
 
-    # ── Benchmark ────────────────────────────────────────────────────────────
-    benchmark: dict[str, float] = get_weighted_benchmark(
-        job_title, top_n=BENCHMARK_TOP_N, min_weight=MIN_SKILL_WEIGHT
-    )
-    if not benchmark:
-        benchmark = get_weighted_benchmark(
-            raw_category, top_n=BENCHMARK_TOP_N, min_weight=MIN_SKILL_WEIGHT
+    # ── Benchmark & JD Dynamic Weighting ─────────────────────────────────────
+    if jd_skills:
+        benchmark = {}
+        for skill in jd_skills:
+            s_lower = skill.lower()
+            initial_weight = DEFAULT_SKILL_WEIGHTS.get(s_lower, 1.0)
+            
+            # If skill is found in both uploaded JD and enchanced_taxonomy, boost it
+            if s_lower in DEFAULT_SKILL_WEIGHTS:
+                benchmark[skill] = max(4.0, initial_weight * 1.5)
+            else:
+                benchmark[skill] = initial_weight
+    else:
+        benchmark: dict[str, float] = get_weighted_benchmark(
+            job_title, top_n=BENCHMARK_TOP_N, min_weight=MIN_SKILL_WEIGHT
         )
+        if not benchmark:
+            benchmark = get_weighted_benchmark(
+                raw_category, top_n=BENCHMARK_TOP_N, min_weight=MIN_SKILL_WEIGHT
+            )
 
     extracted_skills: list[str] = list(candidate_row.get("Extracted_Skills") or [])
     extracted_set = {s.lower() for s in extracted_skills}
@@ -137,9 +153,17 @@ def evaluate_candidate(
         ratio_label  = ratio.label
 
     # ── Weighted cosine similarity ───────────────────────────────────────────
-    bench_text = build_benchmark_text(job_title, top_n=BENCHMARK_TOP_N)
+    if jd_skills:
+        # Build text directly from the custom JD dict (repeated by weight)
+        bench_words = []
+        for s, w in benchmark.items():
+            bench_words.extend([s] * max(1, int(round(w))))
+        bench_text = " ".join(bench_words)
+    else:
+        bench_text = build_benchmark_text(job_title, top_n=BENCHMARK_TOP_N)
+        
     bench_vec  = vectorizer.transform([bench_text])
-    wt_cosine  = float(cosine_similarity(cand_vec, bench_vec)[0][0])
+    wt_cosine  = float(cosine_similarity(cand_vec, bench_vec))
 
     # ── Composite, grade, pathway ────────────────────────────────────────────
     composite     = (weighted_fit + wt_cosine) / 2
@@ -177,7 +201,7 @@ def evaluate_candidate(
         "Hard_Fit":            round(hard_fit, 4),
         "Soft_Fit":            round(soft_fit, 4),
         "Split_Weighted_Fit":  round(weighted_fit, 4),
-        "Weighted_Fit":        round(weighted_fit, 4),   # kept for backward compat
+        "Weighted_Fit":        round(weighted_fit, 4),
         "Weighted_Cosine":     round(wt_cosine, 4),
         "Composite_Score":     round(composite, 4),
         "Confidence_Scores":   confidence_scores,
@@ -197,11 +221,17 @@ def batch_evaluate(
     vectorizer: TfidfVectorizer,
     skill_vectors: dict | None = None,
     resume_col: str = "Resume_str",
+    jd_skills: set[str] | list[str] | None = None,
 ) -> list[dict]:
     results = []
     for _, row in resume_df.iterrows():
         try:
-            m = evaluate_candidate(row, vectorizer, skill_vectors, resume_col=resume_col)
+            # Check if JD skills are provided globally or per row
+            row_jd_skills = row.get("JD_Skills", jd_skills)
+            m = evaluate_candidate(
+                row, vectorizer, skill_vectors, 
+                resume_col=resume_col, jd_skills=row_jd_skills
+            )
             results.append(m)
         except Exception as exc:
             results.append({"ID": row.get("ID"), "error": str(exc)})

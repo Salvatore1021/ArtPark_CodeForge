@@ -1,398 +1,486 @@
 """
-main.py — AI-Adaptive Onboarding Engine API
-ARTPARK CodeForge Hackathon
+main.py
+-------
+AI-Driven Candidate Onboarding Engine — entry point.
 
-Endpoints:
-  GET  /health                  — Liveness check
-  POST /analyze                 — Full analysis: resume + JD → pathway
-  POST /extract/resume          — Extract skills from resume only
-  POST /extract/jd              — Extract skills from JD only
-  GET  /catalog                 — Return full course catalog
-  GET  /catalog/{course_id}     — Return single course details
+Usage
+-----
+  python main.py --resume_pdf Aditya_CV.pdf --job_title "Machine Learning"
+  python main.py --resume_pdf resume.pdf --recommend
+  python main.py --csv data/Resume.csv --id 16237710
+  python main.py --list_sectors
+  python main.py --list_jobs --sector "Data & AI"
 """
-import logging
-import os
-import tempfile
-import time
-from contextlib import asynccontextmanager
+
+from __future__ import annotations
+import argparse
+import sys
+from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-# Updated imports pointing to result_engine
-from result_engine.pdf_parser import extract_text_from_pdf as vedant_extract, parse_resume_pdf, resume_profile_to_dataframe_row
-from result_engine.skill_extractor import build_skill_library, extract_skills as vedant_extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
-from result_engine.dependency_graph import build_skill_dependency_graph
-from result_engine.candidate_evaluator import evaluate_candidate
-from result_engine.gap_prioritizer import prioritize_gaps
-from result_engine.roadmap_builder import build_roadmap
-from result_engine.dashboard import generate_dashboard
-
-from gap_analyzer import compute_skill_gap
-from metrics import evaluate_pathway
-from pathway_engine import generate_learning_pathway, load_course_catalog
-
-# Import the new NLP pipeline modules
-from resume_parser import parse_resume_html, parse_resume_plaintext
-from skill_extractor import extract_all_skills
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("aurora")
+from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
+from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
+from pdf_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
+from skill_extractor import FULL_SKILL_LIBRARY, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
+from dependency_graph import build_skill_dependency_graph
+from candidate_evaluator import evaluate_candidate, batch_evaluate
+from gap_prioritizer import prioritize_gaps
+from roadmap_builder import build_roadmap
+from dashboard import generate_dashboard
+from role_recommender import recommend_roles
+from report_exporter import export_all
+from skill_classifier import split_benchmark, get_category_type
 
 
-# ---------------------------------------------------------------------------
-# App lifecycle
-# ---------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting AI-Adaptive Onboarding Engine...")
-    # Pre-warm catalog cache
-    catalog = load_course_catalog()
-    logger.info(f"Catalog loaded: {len(catalog)} courses")
-    yield
-    logger.info("Shutting down...")
 
+# ── Readiness description ─────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# App init
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title="AI-Adaptive Onboarding Engine",
-    description=(
-        "Parse resume + job description → extract skill gaps → "
-        "generate personalized, graph-ordered learning pathway."
-    ),
-    version="1.0.0",
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ---------------------------------------------------------------------------
-# Request timing middleware
-# ---------------------------------------------------------------------------
-@app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start = time.time()
-    response = await call_next(request)
-    elapsed = round(time.time() - start, 3)
-    response.headers["X-Process-Time"] = str(elapsed)
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({elapsed}s)")
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Allowed file types
-# ---------------------------------------------------------------------------
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md"}
-MAX_FILE_SIZE_MB = 10
-
-
-def _validate_file(upload: UploadFile) -> None:
-    """Raise HTTPException if file type is disallowed."""
-    name = upload.filename or ""
-    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File type '{ext}' not supported. Allowed: {ALLOWED_EXTENSIONS}",
-        )
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
-@app.get("/health", tags=["System"])
-def health():
-    """Liveness check."""
+def _readiness_label(grade: str) -> str:
     return {
-        "status": "ok",
-        "service": "AI-Adaptive Onboarding Engine",
-        "version": "1.0.0",
-        "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
-    }
+        "A": "Excellent  — ready to hit the ground running",
+        "B": "Good       — strong foundation, minor gaps",
+        "C": "Developing — solid base, some key areas to build",
+        "D": "Needs Work — important foundations to establish",
+        "F": "Beginner   — great starting point for structured learning",
+    }.get(grade, "Unknown")
 
 
-@app.get("/catalog", tags=["Catalog"])
-def get_catalog():
-    """Return the full course catalog used for pathway generation."""
-    catalog = load_course_catalog()
-    return {
-        "total_courses": len(catalog),
-        "courses": catalog,
-    }
+def _importance_label(weight: float) -> str:
+    if weight >= 3.75: return "Essential"
+    if weight >= 3.25: return "Very Important"
+    if weight >= 2.75: return "Important"
+    return "Useful"
 
 
-@app.get("/catalog/{course_id}", tags=["Catalog"])
-def get_course(course_id: str):
-    """Return details for a single course by ID."""
-    catalog = load_course_catalog()
-    for course in catalog:
-        if course["id"] == course_id:
-            return course
-    raise HTTPException(status_code=404, detail=f"Course '{course_id}' not found")
+def _progress_bar(score: float, width: int = 20) -> str:
+    filled = round(score * width)
+    return "█" * filled + "░" * (width - filled)
 
 
-@app.post("/extract/resume", tags=["Extraction"])
-async def extract_resume(file: UploadFile = File(..., description="Resume PDF/DOCX/TXT")):
-    """Extract structured skill profile from a resume document."""
-    _validate_file(file)
-    raw_bytes = await file.read()
-    text = extract_text(raw_bytes, file.filename or "resume.pdf")
-    if not text.strip():
-        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded resume.")
-    result = await extract_skills_from_resume(text)
-    return {
-        "filename": file.filename,
-        "char_count": len(text),
-        "extraction_method": result.get("extraction_method"),
-        "profile": result,
-    }
+# ── Pretty print helpers ──────────────────────────────────────────────────────
+
+def _section(title: str) -> None:
+    print(f"\n{'═'*62}")
+    print(f"  {title}")
+    print(f"{'═'*62}")
 
 
-@app.post("/extract/jd", tags=["Extraction"])
-async def extract_jd(file: UploadFile = File(..., description="Job Description PDF/DOCX/TXT")):
-    """Extract required skills from a job description document."""
-    _validate_file(file)
-    raw_bytes = await file.read()
-    text = extract_text(raw_bytes, file.filename or "jd.pdf")
-    if not text.strip():
-        raise HTTPException(status_code=422, detail="Could not extract text from the uploaded JD.")
-    result = await extract_skills_from_jd(text)
-    return {
-        "filename": file.filename,
-        "char_count": len(text),
-        "extraction_method": result.get("extraction_method"),
-        "job_profile": result,
-    }
+def _line() -> None:
+    print(f"  {'─'*58}")
 
 
-@app.post("/analyze", tags=["Core"])
-async def analyze(
-    resume: UploadFile = File(..., description="Candidate resume (PDF/DOCX/TXT)"),
-    job_description: UploadFile = File(..., description="Target job description (PDF/DOCX/TXT)"),
-):
-    """
-    Full end-to-end analysis pipeline:
-    1. Extract text from resume and JD
-    2. Use LLM to extract structured skills from both
-    3. Compute skill gap with priority scoring
-    4. Generate adaptive, graph-ordered learning pathway
-    5. Return full analysis with reasoning traces
-    """
-    # --- Validate ---
-    _validate_file(resume)
-    _validate_file(job_description)
+# ── Core display functions ────────────────────────────────────────────────────
 
-    # --- Extract text ---
-    resume_bytes = await resume.read()
-    jd_bytes = await job_description.read()
+def _print_candidate_profile(profile: dict | None, cand_id, category: str, job_title: str) -> None:
+    _section("CANDIDATE PROFILE")
+    if profile:
+        print(f"  Name          :  {profile.get('name', 'Not found')}")
+        print(f"  Email         :  {profile.get('email', 'Not found')}")
+        print(f"  Phone         :  {profile.get('phone', 'Not found')}")
+        if profile.get("linkedin"):
+            print(f"  LinkedIn      :  {profile['linkedin']}")
+        if profile.get("education"):
+            print(f"  Education     :  {profile['education'][0]}")
+        if profile.get("experience"):
+            print(f"  Experience    :  {profile['experience'][0]}")
+    else:
+        print(f"  Candidate ID  :  {cand_id}")
 
-    resume_text = extract_text(resume_bytes, resume.filename or "resume.pdf")
-    jd_text = extract_text(jd_bytes, job_description.filename or "jd.pdf")
+    _section("JOB IDENTIFICATION")
+    sector = ""
+    from taxonomy_adapter import get_sector
+    sector = get_sector(job_title) or "Professional"
+    cat_type = get_category_type(category, job_title)
+    cat_label = {
+        "TECH": "Technical / Technology",
+        "MANAGEMENT": "Management & Business",
+        "HEALTHCARE": "Healthcare & Clinical",
+        "EDUCATION": "Education & Training",
+        "CREATIVE": "Arts & Creative",
+        "NON_TECH": "Professional Services",
+    }.get(cat_type, cat_type)
 
-    if not resume_text.strip():
-        raise HTTPException(status_code=422, detail="Resume text extraction returned empty content.")
-    if not jd_text.strip():
-        raise HTTPException(status_code=422, detail="JD text extraction returned empty content.")
+    print(f"  Target Role   :  {job_title}")
+    print(f"  Industry      :  {sector}")
+    print(f"  Category      :  {cat_label}")
 
-    # --- Extract skills (LLM / fallback) ---
-    resume_data, jd_data = await _extract_both(resume_text, jd_text)
 
-    # --- Skill gap analysis ---
-    gap_analysis = compute_skill_gap(resume_data, jd_data)
+def _print_readiness(metrics: dict) -> None:
+    _section("OVERALL READINESS")
+    grade   = metrics["Grade"]
+    score   = metrics["Composite_Score"]
+    pct     = round(score * 100)
+    label   = _readiness_label(grade)
+    bar     = _progress_bar(score, width=30)
+    pathway = metrics["Pathway_Depth"]
+    weeks   = metrics["Duration"]
 
-    # --- Adaptive pathway generation ---
-    catalog = load_course_catalog()
-    pathway = generate_learning_pathway(gap_analysis, jd_data, catalog)
+    print(f"  Readiness     :  {pct}%  [{bar}]")
+    print(f"  Status        :  {label}")
+    print(f"  Learning Plan :  {pathway}")
+    print(f"  Duration      :  {weeks} Weeks")
 
-    # --- Evaluate pathway quality + compute savings ---
-    evaluation = evaluate_pathway(gap_analysis, pathway, catalog)
+    # Hard vs soft breakdown in plain language
+    split = metrics.get("Split_Details", {})
+    if split:
+        hard_pct = round(split.get("hard_fit", 0) * 100)
+        soft_pct = round(split.get("soft_fit", 0) * 100)
+        h_weight = round(split.get("hard_weight", 0) * 100)
+        s_weight = round(split.get("soft_weight", 0) * 100)
+        print()
+        print(f"  Technical Skills Score  :  {hard_pct}%  (counts for {h_weight}% of your score)")
+        print(f"  Soft Skills Score       :  {soft_pct}%  (counts for {s_weight}% of your score)")
 
-    # --- Build response ---
-    return {
-        "meta": {
-            "resume_filename": resume.filename,
-            "jd_filename": job_description.filename,
-            "resume_extraction_method": resume_data.get("extraction_method"),
-            "jd_extraction_method": jd_data.get("extraction_method"),
+
+def _print_skills(metrics: dict, job_title: str) -> None:
+    _section("SKILLS IDENTIFIED IN YOUR CV")
+
+    extracted    = sorted(metrics.get("Extracted_Skills", []))
+    conf_scores  = metrics.get("Confidence_Scores", {})
+    hard_bench, soft_bench = split_benchmark(
+        metrics.get("Gap_Weights", {}) | {
+            s: conf_scores.get(s, {}).get("onet_weight", 3.0) for s in extracted
         },
-        "candidate_profile": {
-            "name": resume_data.get("candidate_name"),
-            "current_role": resume_data.get("current_role"),
-            "years_experience": resume_data.get("years_total_experience"),
-            "skills": resume_data.get("skills", []),
-        },
-        "target_role": {
-            "title": jd_data.get("job_title"),
-            "department": jd_data.get("department"),
-            "seniority": jd_data.get("seniority"),
-            "required_skills": jd_data.get("skills", []),
-        },
-        "gap_analysis": gap_analysis,
-        "learning_pathway": pathway,
-        "evaluation": evaluation,
-    }
+        job_title,
+    )
+
+    hard_found = [s for s in extracted if s in hard_bench or
+                  s not in {g.lower() for g in metrics.get("Gaps", [])}]
+    soft_found = [s for s in extracted if s.lower() not in hard_found]
+
+    # Simpler: classify each extracted skill
+    from skill_classifier import classify_skill
+    tech_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "hard"])
+    soft_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "soft"])
+
+    print(f"  Total skills found  :  {len(extracted)}")
+    print()
+    if tech_skills:
+        # Wrap into lines of ~55 chars
+        line, lines = "", []
+        for s in tech_skills:
+            chunk = (", " if line else "") + s.title()
+            if len(line) + len(chunk) > 55:
+                lines.append(line)
+                line = s.title()
+            else:
+                line += chunk
+        if line: lines.append(line)
+        print(f"  Technical Skills  :  {lines[0]}")
+        for l in lines[1:]:
+            print(f"                     {l}")
+
+    print()
+    if soft_skills:
+        line, lines = "", []
+        for s in soft_skills:
+            chunk = (", " if line else "") + s.title()
+            if len(line) + len(chunk) > 55:
+                lines.append(line)
+                line = s.title()
+            else:
+                line += chunk
+        if line: lines.append(line)
+        print(f"  Soft / People     :  {lines[0]}")
+        for l in lines[1:]:
+            print(f"                     {l}")
 
 
-async def _extract_both(resume_text: str, jd_text: str):
-    """
-    Adapter function: Runs the NLP pipeline and maps its complex output 
-    to the simple JSON schema expected by the Gap Analyzer.
-    """
-    # 1. Parse text into sections using the NLP pipeline's parser
-    resume_sections = parse_resume_plaintext(resume_text)
-    jd_sections = parse_resume_plaintext(jd_text)
-    
-    # 2. Extract skills using the 5-layer NLP pipeline
-    # (Passing a dummy job title list and education list since we only have raw text here)
-    raw_resume_profile = extract_all_skills(resume_sections, ["Software Engineer"], [])
-    raw_jd_profile = extract_all_skills(jd_sections, ["Target Role"], [])
+def _print_skill_gaps(metrics: dict) -> None:
+    prio_gaps = metrics.get("Prioritized_Gaps", [])
+    if not prio_gaps:
+        return
 
-    # 3. Helper to map 0-3 NLP proficiency to 1-5 System proficiency
-    def map_proficiency(nlp_score):
-        mapping = {0: 2, 1: 3, 2: 4, 3: 5}
-        return mapping.get(nlp_score, 3)
+    _section(f"AREAS TO DEVELOP  ({len(prio_gaps)} identified)")
+    print(f"  {'#':<4} {'Skill':<35} {'Type':<12} {'Importance'}")
+    _line()
 
-    # 4. Format Resume Skills
-    formatted_resume_skills = []
-    for skill in raw_resume_profile.get("skills", []) + raw_resume_profile.get("inferred_skills", []):
-        formatted_resume_skills.append({
-            "skill_name": skill["skill"],
-            "category": skill["category"],
-            "proficiency_level": map_proficiency(skill.get("proficiency", {}).get("score", 1)),
-            "evidence": skill.get("reasoning", "")
-        })
+    from skill_classifier import classify_skill
+    job_title = metrics.get("Job_Title", "")
+    for g in prio_gaps:
+        skill     = g["Skill"].title()
+        weight    = g["ONET_Weight"]
+        imp       = _importance_label(weight)
+        skill_type= "Technical" if classify_skill(g["Skill"], job_title) == "hard" else "Soft Skill"
+        print(f"  {g['Priority']:<4} {skill:<35} {skill_type:<12} {imp}")
 
-    # 5. Format JD Skills
-    formatted_jd_skills = []
-    for skill in raw_jd_profile.get("skills", []) + raw_jd_profile.get("inferred_skills", []):
-        formatted_jd_skills.append({
-            "skill_name": skill["skill"],
-            "category": skill["category"],
-            "required_level": map_proficiency(skill.get("proficiency", {}).get("score", 1)),
-            "is_mandatory": True, # Defaulting to true for NLP extraction
-            "context": skill.get("reasoning", "")
-        })
 
-    # 6. Build final dictionaries matching the old LLM schema
-    resume_data = {
-        "candidate_name": "Candidate",
-        "years_total_experience": raw_resume_profile.get("experience_info", {}).get("total_years", 0),
-        "current_role": "Unknown",
-        "skills": formatted_resume_skills,
-        "extraction_method": "nlp_pipeline"
-    }
+def _print_recommendations(recommendations: list[dict]) -> None:
+    if not recommendations:
+        return
 
-    jd_data = {
-        "job_title": "Target Role",
-        "department": "Engineering",
-        "seniority": "mid",
-        "skills": formatted_jd_skills,
-        "extraction_method": "nlp_pipeline"
-    }
+    top3 = recommendations[:3]
+    _section("TOP 3 ROLES THAT MATCH YOUR PROFILE")
 
-    return resume_data, jd_data
+    for i, r in enumerate(top3, 1):
+        pct   = round(r["composite"] * 100)
+        bar   = _progress_bar(r["composite"], width=20)
+        title = r["job_title"]
+        sec   = r["sector"]
+        matched = [s.title() for s in r["matched_skills"][:5]]
+        gaps    = [s.title() for s in r["gap_skills"][:3]]
 
-@app.post("/analyze/visual", tags=["Visualizer"])
-async def analyze_visual(
-    resume: UploadFile = File(...),
-    job_description: UploadFile = File(...),
-    category: str = Form("ENGINEER")
-):
-    """Runs the isolated Result Engine pipeline and returns a Base64 Matplotlib dashboard."""
-    
-    # 1. Save uploads to temporary files for PyMuPDF processing
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_res, tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_jd:
-        tmp_res.write(await resume.read())
-        tmp_jd.write(await job_description.read())
-        res_path = tmp_res.name
-        jd_path = tmp_jd.name
+        print(f"\n  #{i}  {title}  [{sec}]")
+        print(f"       Match  :  {pct}%  {bar}")
+        print(f"       You have  :  {', '.join(matched) or 'building foundations'}")
+        print(f"       To learn  :  {', '.join(gaps) or 'minor gaps only'}")
 
-    try:
-        # 2. Extract and parse using the Result Engine logic
-        jd_text = vedant_extract(jd_path)
-        jd_req_skills = set(vedant_extract_skills(jd_text, build_skill_library()))
+    print()
 
-        parsed_res = parse_resume_pdf(res_path)
-        cand_row_dict = resume_profile_to_dataframe_row(parsed_res)
-        cand_row_dict["Category"] = category
-        df = pd.DataFrame([cand_row_dict])
 
-        # 3. Vectorize and compute graph
-        vectorizer = build_and_fit_vectorizer(df, job_description_text=jd_text)
-        skill_vectors = precompute_skill_vectors(vectorizer)
-        graph = build_skill_dependency_graph()
+def _print_learning_pathway(metrics: dict, roadmap_df: pd.DataFrame) -> None:
+    _section(f"YOUR PERSONALISED {metrics['Duration']}-WEEK LEARNING PATHWAY")
 
-        # 4. Evaluate Candidate
-        cand_row = df.iloc
-        eval_metrics = evaluate_candidate(cand_row, vectorizer, category=category, jd_skills=jd_req_skills)
+    print(f"  This plan focuses on your most important skill gaps,")
+    print(f"  starting with foundations and building towards advanced topics.")
+    print()
+    print(f"  {'Week':<8} {'What to Learn':<32} {'Goal'}")
+    _line()
 
-        extracted_skills = eval_metrics["Extracted_Skills"]
-        gaps = list(jd_req_skills - set(extracted_skills))
+    for _, row in roadmap_df.iterrows():
+        skill   = row["Skill"].title()
+        obj     = row["Objective"]
+        success = row["Success"]
+        # Truncate long objectives for clean display
+        if len(obj) > 38:
+            obj = obj[:36] + ".."
+        print(f"  {row['Week']:<8} {skill:<32} {obj}")
+        print(f"  {'':<8} {'':32} ✓ {success}")
+        print()
 
-        # 5. Prioritize Gaps & Build Roadmap
-        prioritized_gaps = prioritize_gaps(gaps, eval_metrics["_cand_vec"], skill_vectors, graph)
-        eval_metrics["Prioritized_Gaps"] = prioritized_gaps
-        roadmap_df = build_roadmap(eval_metrics)
 
-        # 6. Generate Base64 Dashboard
-        base64_image = generate_dashboard(eval_metrics, graph, show=False)
+def _print_footer(paths: dict) -> None:
+    _section("REPORTS SAVED")
+    for label, path in [("Full Report (text)", paths.get("text")),
+                         ("Data Export (JSON)", paths.get("json")),
+                         ("Visual Dashboard",   paths.get("dashboard"))]:
+        if path:
+            print(f"  {label:<22}:  {path}")
+    print()
 
-        return {
-            "metrics": {
-                "Composite_Score": eval_metrics["Composite_Score"],
-                "Grade": eval_metrics["Grade"],
-                "Pathway_Depth": eval_metrics["Pathway_Depth"],
-                "Duration": eval_metrics["Duration"]
-            },
-            "dashboard_base64": base64_image
-        }
-    finally:
-        # Cleanup temporary files
-        import os
-        if os.path.exists(res_path): os.remove(res_path)
-        if os.path.exists(jd_path): os.remove(jd_path)
 
-# ---------------------------------------------------------------------------
-# Error handlers
-# ---------------------------------------------------------------------------
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception on {request.url.path}: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error. Please check server logs."},
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
+def _run_pipeline(
+    cand_series: pd.Series,
+    vectorizer, skill_vectors: dict, graph,
+    profile: dict | None = None,
+    category: str | None = None,
+    save_dashboard: bool = True,
+    label: str = "",
+    jd_skills: set[str] | list[str] | None = None,
+) -> dict:
+
+    # ── Evaluate ──────────────────────────────────────────────────────────────
+    metrics  = evaluate_candidate(
+        cand_series, vectorizer, skill_vectors, 
+        category=category, jd_skills=jd_skills
+    )
+    cand_vec = metrics.pop("_cand_vec")
+
+    # ── Prioritise gaps ───────────────────────────────────────────────────────
+    prio_gaps = prioritize_gaps(
+        metrics["Gaps"], metrics["Gap_Weights"], cand_vec, skill_vectors, graph,
+        confidence_scores=metrics.get("Confidence_Scores"),
+    )
+    metrics["Prioritized_Gaps"] = prio_gaps
+
+    # ── Role recommendations (always on, top 3) ───────────────────────────────
+    resume_text    = str(cand_series.get("Resume_str", ""))
+    recommendations = recommend_roles(resume_text, vectorizer, top_n=3, min_match_count=1)
+
+    # ── Roadmap ───────────────────────────────────────────────────────────────
+    roadmap_df = build_roadmap(metrics)
+
+    # ── Print clean output ────────────────────────────────────────────────────
+    cand_id   = metrics["ID"]
+    job_title = metrics["Job_Title"]
+    raw_cat   = category or str(cand_series.get("Category", ""))
+
+    print("\n")
+    print("█" * 62)
+    print("  CANDIDATE ONBOARDING REPORT")
+    print("█" * 62)
+
+    _print_candidate_profile(profile, cand_id, raw_cat, job_title)
+    _print_readiness(metrics)
+    _print_skills(metrics, job_title)
+    _print_skill_gaps(metrics)
+    _print_recommendations(recommendations)
+    _print_learning_pathway(metrics, roadmap_df)
+
+    # ── Save dashboard & exports ──────────────────────────────────────────────
+    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    out_png = Path(OUTPUT_DIR) / f"dashboard_{cand_id}.png" if save_dashboard else None
+
+    generate_dashboard(
+        metrics, graph, recommendations,
+        profile=profile,
+        save_path=out_png, show=True,
+    )
+
+    paths = export_all(
+        metrics, roadmap_df,
+        confidence_scores=metrics.get("Confidence_Scores"),
+        recommendations=recommendations,
+        output_dir=OUTPUT_DIR,
+    )
+    if out_png:
+        paths["dashboard"] = out_png
+
+    _print_footer(paths)
+    return metrics
+
+
+# ── Single PDF ────────────────────────────────────────────────────────────────
+
+def run_single_pdf(
+    resume_pdf_path: str, job_title: str,
+    job_pdf_path: str, save: bool = True,
+) -> None:
+    profile  = parse_resume_pdf(resume_pdf_path)
+    row_dict = resume_profile_to_dataframe_row(profile)
+    row_dict["Category"]        = job_title
+    row_dict["Extracted_Skills"]= extract_skills(profile["full_text"], FULL_SKILL_LIBRARY)
+    cand_series = pd.Series(row_dict)
+
+    pdf_df  = pd.DataFrame([{"Resume_str": profile["full_text"],
+                              "ID": row_dict["ID"], "Category": job_title}])
+    job_text = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
+    jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
+
+    extra   = [build_weighted_benchmark_text(job_title)]
+    vec     = build_and_fit_vectorizer(pdf_df, job_text, FULL_SKILL_LIBRARY,
+                                        extra_benchmark_texts=extra)
+    svecs   = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
+    graph   = build_skill_dependency_graph()
+
+    _run_pipeline(
+        cand_series, vec, svecs, graph,
+        profile=profile, category=job_title,
+        save_dashboard=save, label=profile["name"],
+        jd_skills=jd_skills,
     )
 
 
-# ---------------------------------------------------------------------------
-# Dev entrypoint
-# ---------------------------------------------------------------------------
+# ── Single CSV ────────────────────────────────────────────────────────────────
+
+def run_single_csv(
+    csv_path: str, candidate_id: int,
+    job_pdf_path: str, save: bool = True,
+) -> None:
+    df       = pd.read_csv(csv_path)
+    df["Extracted_Skills"] = df["Resume_str"].apply(lambda t: extract_skills(t, FULL_SKILL_LIBRARY))
+
+    cand_row = df[df["ID"] == candidate_id]
+    if cand_row.empty:
+        print(f"Candidate {candidate_id} not found."); sys.exit(1)
+
+    row      = cand_row.iloc[0]
+    category = str(row.get("Category", ""))
+    resolved = find_job_title(category) or category
+    job_text = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
+    jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
+
+    extra    = [build_weighted_benchmark_text(resolved)]
+    vec      = build_and_fit_vectorizer(df, job_text, FULL_SKILL_LIBRARY,
+                                         extra_benchmark_texts=extra)
+    svecs    = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
+    graph    = build_skill_dependency_graph()
+
+    _run_pipeline(
+        row, vec, svecs, graph,
+        category=category, save_dashboard=save, label=candidate_id,
+        jd_skills=jd_skills,
+    )
+
+
+# ── Batch ─────────────────────────────────────────────────────────────────────
+
+def run_batch(csv_path: str, job_pdf_path: str) -> None:
+    df  = pd.read_csv(csv_path)
+    df["Extracted_Skills"] = df["Resume_str"].apply(lambda t: extract_skills(t, FULL_SKILL_LIBRARY))
+    
+    job_text = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
+    jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
+    
+    vec, svecs = _quick_vectorizer(df, job_text)
+
+    all_metrics = batch_evaluate(df, vec, svecs, jd_skills=jd_skills)
+    rows = [{
+        "ID":       m.get("ID"),
+        "Name":     m.get("ID"),
+        "Role":     m.get("Job_Title",""),
+        "Grade":    m.get("Grade",""),
+        "Readiness":f"{round(m.get('Composite_Score',0)*100)}%",
+        "Pathway":  m.get("Pathway_Depth",""),
+        "Weeks":    m.get("Duration",""),
+        "Gaps":     len(m.get("Gaps",[])),
+    } for m in all_metrics if "error" not in m]
+
+    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    out = Path(OUTPUT_DIR) / "batch_results.csv"
+    pd.DataFrame(rows).to_csv(out, index=False)
+    print(pd.DataFrame(rows).to_string(index=False))
+    print(f"\nResults saved to {out}")
+
+
+def _quick_vectorizer(df, job_text):
+    vec   = build_and_fit_vectorizer(df, job_text, FULL_SKILL_LIBRARY)
+    svecs = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
+    return vec, svecs
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Candidate Onboarding Engine",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--csv",        type=str, default=RESUME_CSV_PATH)
+    src.add_argument("--resume_pdf", type=str, help="Path to candidate PDF resume")
+
+    p.add_argument("--id",           type=int,  help="Candidate ID (CSV mode)")
+    p.add_argument("--job_title",    type=str,  default=None,
+                   help="Target job title e.g. 'Machine Learning', 'Accountants and Auditors'")
+    p.add_argument("--job",          type=str,  default=JOB_DESC_PDF_PATH)
+    p.add_argument("--batch",        action="store_true", help="Evaluate all candidates in CSV")
+    p.add_argument("--no_save",      action="store_true", help="Don't save dashboard image")
+    p.add_argument("--list_sectors", action="store_true", help="Show all available sectors")
+    p.add_argument("--list_jobs",    action="store_true", help="Show available job titles")
+    p.add_argument("--sector",       type=str,  default=None)
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    save = not args.no_save
+
+    if args.list_sectors:
+        print("\nAvailable sectors:")
+        for s in list_sectors(): print(f"  {s}")
+        return
+
+    if args.list_jobs:
+        print(f"\nJob titles{' in ' + args.sector if args.sector else ''}:")
+        for j in list_jobs(args.sector): print(f"  {j}")
+        return
+
+    if args.resume_pdf:
+        job_title = args.job_title or "Machine Learning"
+        run_single_pdf(args.resume_pdf, job_title, args.job, save=save)
+
+    elif args.batch:
+        run_batch(args.csv, args.job)
+
+    else:
+        if args.id is None:
+            build_parser().error("--id is required when using --csv mode.")
+        run_single_csv(args.csv, args.id, args.job, save=save)
+
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        reload=bool(os.getenv("DEV_RELOAD", False)),
-        log_level="info",
-    )
+    main()

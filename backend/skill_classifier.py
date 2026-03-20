@@ -12,7 +12,7 @@ worth 80%.  Using the same flat score for both distorts the evaluation.
 
 Hard/soft split ratios by job category type
 -------------------------------------------
-  TECH         : 80% hard  / 20% soft
+  TECH         : 95% hard  / 05% soft
   MANAGEMENT   : 50% hard  / 50% soft
   HEALTHCARE   : 65% hard  / 35% soft
   EDUCATION    : 55% hard  / 45% soft
@@ -58,7 +58,7 @@ class SkillWeightRatio:
 
 
 CATEGORY_RATIOS: dict[str, SkillWeightRatio] = {
-    CategoryType.TECH.value:       SkillWeightRatio(hard=0.80, soft=0.20, label="Tech (80/20)"),
+    CategoryType.TECH.value:       SkillWeightRatio(hard=0.95, soft=0.05, label="Tech (95/5)"),
     CategoryType.MANAGEMENT.value: SkillWeightRatio(hard=0.50, soft=0.50, label="Management (50/50)"),
     CategoryType.HEALTHCARE.value: SkillWeightRatio(hard=0.65, soft=0.35, label="Healthcare (65/35)"),
     CategoryType.EDUCATION.value:  SkillWeightRatio(hard=0.55, soft=0.45, label="Education (55/45)"),
