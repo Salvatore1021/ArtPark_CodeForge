@@ -10,6 +10,18 @@ Endpoints:
   GET  /catalog                 — Return full course catalog
   GET  /catalog/{course_id}     — Return single course details
 """
+import tempfile
+from fastapi import Form
+import pandas as pd
+
+# Updated imports pointing to result_engine
+from result_engine.pdf_parser import extract_text_from_pdf as vedant_extract, parse_resume_pdf, resume_profile_to_dataframe_row
+from result_engine.skill_extractor import build_skill_library, extract_skills as vedant_extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
+from result_engine.dependency_graph import build_skill_dependency_graph
+from result_engine.candidate_evaluator import evaluate_candidate
+from result_engine.gap_prioritizer import prioritize_gaps
+from result_engine.roadmap_builder import build_roadmap
+from result_engine.dashboard import generate_dashboard
 
 from gap_analyzer import compute_skill_gap
 from metrics import evaluate_pathway
@@ -292,6 +304,66 @@ async def _extract_both(resume_text: str, jd_text: str):
     }
 
     return resume_data, jd_data
+
+@app.post("/analyze/visual", tags=["Visualizer"])
+async def analyze_visual(
+    resume: UploadFile = File(...),
+    job_description: UploadFile = File(...),
+    category: str = Form("ENGINEER")
+):
+    """Runs the isolated Result Engine pipeline and returns a Base64 Matplotlib dashboard."""
+    
+    # 1. Save uploads to temporary files for PyMuPDF processing
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_res, tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_jd:
+        tmp_res.write(await resume.read())
+        tmp_jd.write(await job_description.read())
+        res_path = tmp_res.name
+        jd_path = tmp_jd.name
+
+    try:
+        # 2. Extract and parse using the Result Engine logic
+        jd_text = vedant_extract(jd_path)
+        jd_req_skills = set(vedant_extract_skills(jd_text, build_skill_library()))
+
+        parsed_res = parse_resume_pdf(res_path)
+        cand_row_dict = resume_profile_to_dataframe_row(parsed_res)
+        cand_row_dict["Category"] = category
+        df = pd.DataFrame([cand_row_dict])
+
+        # 3. Vectorize and compute graph
+        vectorizer = build_and_fit_vectorizer(df, job_description_text=jd_text)
+        skill_vectors = precompute_skill_vectors(vectorizer)
+        graph = build_skill_dependency_graph()
+
+        # 4. Evaluate Candidate
+        cand_row = df.iloc
+        eval_metrics = evaluate_candidate(cand_row, vectorizer, category=category, jd_skills=jd_req_skills)
+
+        extracted_skills = eval_metrics["Extracted_Skills"]
+        gaps = list(jd_req_skills - set(extracted_skills))
+
+        # 5. Prioritize Gaps & Build Roadmap
+        prioritized_gaps = prioritize_gaps(gaps, eval_metrics["_cand_vec"], skill_vectors, graph)
+        eval_metrics["Prioritized_Gaps"] = prioritized_gaps
+        roadmap_df = build_roadmap(eval_metrics)
+
+        # 6. Generate Base64 Dashboard
+        base64_image = generate_dashboard(eval_metrics, graph, show=False)
+
+        return {
+            "metrics": {
+                "Composite_Score": eval_metrics["Composite_Score"],
+                "Grade": eval_metrics["Grade"],
+                "Pathway_Depth": eval_metrics["Pathway_Depth"],
+                "Duration": eval_metrics["Duration"]
+            },
+            "dashboard_base64": base64_image
+        }
+    finally:
+        # Cleanup temporary files
+        import os
+        if os.path.exists(res_path): os.remove(res_path)
+        if os.path.exists(jd_path): os.remove(jd_path)
 
 # ---------------------------------------------------------------------------
 # Error handlers
