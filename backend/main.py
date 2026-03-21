@@ -21,7 +21,7 @@ import pandas as pd
 
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
 from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
-from pdf_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
+from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
 from skill_extractor import FULL_SKILL_LIBRARY, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
 from dependency_graph import build_skill_dependency_graph
 from candidate_evaluator import evaluate_candidate, batch_evaluate
