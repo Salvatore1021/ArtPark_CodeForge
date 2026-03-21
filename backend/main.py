@@ -22,7 +22,7 @@ import pandas as pd
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
 from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
 from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
-from skill_extractor import FULL_SKILL_LIBRARY, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
+from skill_extractor import FULL_SKILL_LIBRARY, extract_all_skills, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
 from dependency_graph import build_skill_dependency_graph
 from candidate_evaluator import evaluate_candidate, batch_evaluate
 from gap_prioritizer import prioritize_gaps
@@ -145,15 +145,6 @@ def _print_skills(metrics: dict, job_title: str) -> None:
         job_title,
     )
 
-    hard_found = [s for s in extracted if s in hard_bench or
-                  s not in {g.lower() for g in metrics.get("Gaps", [])}]
-    soft_found = [s for s in extracted if s.lower() not in hard_found]
-
-    # Simpler: classify each extracted skill
-    from skill_classifier import classify_skill
-    tech_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "hard"])
-    soft_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "soft"])
-
     print(f"  Total skills found  :  {len(extracted)}")
     print()
     if tech_skills:
@@ -263,63 +254,68 @@ def _print_footer(paths: dict) -> None:
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def _run_pipeline(
-    cand_series: pd.Series,
-    vectorizer, skill_vectors: dict, graph,
-    profile: dict | None = None,
-    category: str | None = None,
-    save_dashboard: bool = True,
-    label: str = "",
-    jd_skills: set[str] | list[str] | None = None,
+    cand_series,
+    vectorizer, skill_vectors, graph,
+    profile=None,
+    category=None,
+    save_dashboard=True,
+    label="",
+    jd_skills=None,
+    llm_json=None,        # ← NEW: LLM extraction output, None in CSV/batch mode
 ) -> dict:
-
-    # ── Evaluate ──────────────────────────────────────────────────────────────
+ 
+    # ── Evaluate (job matching + gap analysis) ────────────────────────────────
     metrics  = evaluate_candidate(
-        cand_series, vectorizer, skill_vectors, 
-        category=category, jd_skills=jd_skills
+        cand_series, vectorizer, skill_vectors,
+        category=category, jd_skills=jd_skills,
+        llm_json=llm_json,    # ← passed through to evaluator
     )
     cand_vec = metrics.pop("_cand_vec")
-
+ 
     # ── Prioritise gaps ───────────────────────────────────────────────────────
     prio_gaps = prioritize_gaps(
         metrics["Gaps"], metrics["Gap_Weights"], cand_vec, skill_vectors, graph,
         confidence_scores=metrics.get("Confidence_Scores"),
     )
     metrics["Prioritized_Gaps"] = prio_gaps
-
-    # ── Role recommendations (always on, top 3) ───────────────────────────────
-    resume_text    = str(cand_series.get("Resume_str", ""))
+ 
+    # ── Role recommendations ──────────────────────────────────────────────────
+    resume_text     = str(cand_series.get("Resume_str", ""))
     recommendations = recommend_roles(resume_text, vectorizer, top_n=3, min_match_count=1)
-
+ 
     # ── Roadmap ───────────────────────────────────────────────────────────────
     roadmap_df = build_roadmap(metrics)
-
-    # ── Print clean output ────────────────────────────────────────────────────
+    metrics["Duration"] = len(roadmap_df)   # keep Duration honest after roadmap fix
+ 
+    # ── Print ─────────────────────────────────────────────────────────────────
     cand_id   = metrics["ID"]
     job_title = metrics["Job_Title"]
     raw_cat   = category or str(cand_series.get("Category", ""))
-
+ 
     print("\n")
     print("█" * 62)
     print("  CANDIDATE ONBOARDING REPORT")
     print("█" * 62)
-
+ 
     _print_candidate_profile(profile, cand_id, raw_cat, job_title)
     _print_readiness(metrics)
     _print_skills(metrics, job_title)
     _print_skill_gaps(metrics)
     _print_recommendations(recommendations)
     _print_learning_pathway(metrics, roadmap_df)
-
-    # ── Save dashboard & exports ──────────────────────────────────────────────
+ 
+    # ── Save ──────────────────────────────────────────────────────────────────
+    from pathlib import Path
+    from config import OUTPUT_DIR
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     out_png = Path(OUTPUT_DIR) / f"dashboard_{cand_id}.png" if save_dashboard else None
-
+ 
     generate_dashboard(
         metrics, graph, recommendations,
         profile=profile,
         save_path=out_png, show=True,
     )
-
+ 
     paths = export_all(
         metrics, roadmap_df,
         confidence_scores=metrics.get("Confidence_Scores"),
@@ -328,39 +324,74 @@ def _run_pipeline(
     )
     if out_png:
         paths["dashboard"] = out_png
-
+ 
     _print_footer(paths)
     return metrics
 
+def _llm_result_to_series(
+    llm_output: dict,
+    resume_text: str,
+    profile: dict,
+    job_title: str,
+    row_dict: dict,
+) -> pd.Series:
+    """
+    Bridge LLM extraction output → pd.Series expected by evaluate_candidate.
+    Merges the contact/ID fields already built by resume_profile_to_dataframe_row
+    with the skill list from the LLM.
+    """
+    row_dict["Category"]         = job_title
+    row_dict["Extracted_Skills"] = [s["skill"] for s in llm_output["skills"]]
+    return pd.Series(row_dict)
 
 # ── Single PDF ────────────────────────────────────────────────────────────────
 
 def run_single_pdf(
-    resume_pdf_path: str, job_title: str,
-    job_pdf_path: str, save: bool = True,
+    resume_pdf_path, job_title,
+    job_pdf_path, save=True,
 ) -> None:
+    from pathlib import Path
+    from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
+    from skill_extractor import extract_all_skills, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors, FULL_SKILL_LIBRARY
+    from taxonomy_adapter import build_weighted_benchmark_text
+    from dependency_graph import build_skill_dependency_graph
+ 
+    import pandas as pd
+ 
+    # Step 1: parse PDF → structured dict
     profile  = parse_resume_pdf(resume_pdf_path)
     row_dict = resume_profile_to_dataframe_row(profile)
-    row_dict["Category"]        = job_title
-    row_dict["Extracted_Skills"]= extract_skills(profile["full_text"], FULL_SKILL_LIBRARY)
-    cand_series = pd.Series(row_dict)
-
-    pdf_df  = pd.DataFrame([{"Resume_str": profile["full_text"],
-                              "ID": row_dict["ID"], "Category": job_title}])
-    job_text = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
+ 
+    # Step 2: LLM extraction → JSON
+    print(f"\n  [pipeline] Running LLM extraction via Ollama...")
+    llm_output = extract_all_skills(profile)
+ 
+    # Step 3: bridge LLM JSON → evaluator-compatible Series
+    cand_series = _llm_result_to_series(llm_output, row_dict, job_title)
+ 
+    # Step 4: build TF-IDF vectorizer (still needed for cosine similarity)
+    pdf_df   = pd.DataFrame([{
+        "Resume_str": profile["full_text"],
+        "ID":         row_dict["ID"],
+        "Category":   job_title,
+    }])
+    job_text  = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
-
-    extra   = [build_weighted_benchmark_text(job_title)]
-    vec     = build_and_fit_vectorizer(pdf_df, job_text, FULL_SKILL_LIBRARY,
-                                        extra_benchmark_texts=extra)
-    svecs   = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
-    graph   = build_skill_dependency_graph()
-
+ 
+    extra = [build_weighted_benchmark_text(job_title)]
+    vec   = build_and_fit_vectorizer(pdf_df, job_text, FULL_SKILL_LIBRARY,
+                                     extra_benchmark_texts=extra)
+    svecs = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
+    graph = build_skill_dependency_graph()
+ 
+    # Steps 5–6: job matching → gap analysis → roadmap
+    # llm_json passed so evaluator uses LLM confidence, not TF-IDF vectors
     _run_pipeline(
         cand_series, vec, svecs, graph,
         profile=profile, category=job_title,
         save_dashboard=save, label=profile["name"],
         jd_skills=jd_skills,
+        llm_json=llm_output,    # ← the key change
     )
 
 

@@ -72,9 +72,6 @@ def prioritize_gaps(
         if confidence_scores and gap.lower() in confidence_scores:
             conf       = confidence_scores[gap.lower()]["confidence"]
             gap_score  = round(1.0 - conf, 4)   # 1 = no knowledge, 0 = near-strong
-        else:
-            sim       = calculate_robust_similarity(resume_vector, gap, skill_vectors)
-            gap_score = round(1.0 - sim, 4)
 
         sim = calculate_robust_similarity(resume_vector, gap, skill_vectors)
         records.append({
