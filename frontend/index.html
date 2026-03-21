@@ -3,215 +3,259 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AURORA — AI Adaptive Onboarding Engine</title>
+  <title>AURORA - Adaptive Onboarding Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <canvas id="particle-canvas" class="particle-canvas" aria-hidden="true"></canvas>
 
-  <!-- ========================= HEADER ========================= -->
-  <header class="header">
-    <div class="header-inner">
-      <div class="logo">
-        <span class="logo-mark">◈</span>
-        <span class="logo-text">AURORA</span>
-        <span class="logo-sub">Adaptive Onboarding Engine</span>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div>
+          <div class="brand-title">AURORA</div>
+          <div class="brand-sub">Adaptive Onboarding Studio</div>
+        </div>
       </div>
-      <nav class="header-nav">
-        <a href="#upload-section" class="nav-link">Analyze</a>
-        <a href="http://localhost:8000/docs" target="_blank" class="nav-link nav-link--api">API Docs ↗</a>
+      <nav class="topnav">
+        <a href="#upload-section">Analyze</a>
+        <a href="#results-section">Insights</a>
+        <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer">API Docs</a>
       </nav>
     </div>
   </header>
 
-  <!-- ========================= HERO ========================= -->
-  <section class="hero">
-    <div class="hero-bg-grid"></div>
-    <div class="hero-content">
-      <div class="hero-badge">ARTPARK × CodeForge Hackathon</div>
-      <h1 class="hero-title">
-        Stop generic onboarding.<br/>
-        <span class="hero-title-accent">Start adaptive learning.</span>
-      </h1>
-      <p class="hero-desc">
-        Upload your resume and optionally a job description. AURORA extracts your skill profile,
-        computes exact skill gaps, and generates a personalized, prerequisite-aware
-        learning pathway — powered by LLMs and graph algorithms.
-      </p>
-      <div class="hero-stats">
-        <div class="stat"><span class="stat-num">35+</span><span class="stat-label">Courses</span></div>
-        <div class="stat-sep"></div>
-        <div class="stat"><span class="stat-num">7</span><span class="stat-label">Domains</span></div>
-        <div class="stat-sep"></div>
-        <div class="stat"><span class="stat-num">0</span><span class="stat-label">Hallucinations</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ========================= UPLOAD ========================= -->
-  <section class="upload-section" id="upload-section">
-    <div class="container">
-      <div class="section-label">Step 1 — Upload Documents</div>
-      <div class="upload-grid">
-
-        <!-- Resume Upload -->
-        <div class="upload-card" id="resume-drop-zone">
-          <div class="upload-icon">📄</div>
-          <div class="upload-title">Resume / CV</div>
-          <div class="upload-hint">PDF, DOCX, or TXT · max 10MB</div>
-          <label class="upload-btn" for="resume-input">Choose File</label>
-          <input type="file" id="resume-input" accept=".pdf,.docx,.doc,.txt,.md" hidden />
-          <div class="upload-filename" id="resume-name">No file selected</div>
-        </div>
-
-        <!-- JD Upload -->
-        <div class="upload-card" id="jd-drop-zone">
-          <div class="upload-icon">💼</div>
-          <div class="upload-title">Job Description (Optional)</div>
-          <div class="upload-hint">PDF, DOCX, or TXT · max 10MB</div>
-          <label class="upload-btn" for="jd-input">Choose File</label>
-          <input type="file" id="jd-input" accept=".pdf,.docx,.doc,.txt,.md" hidden />
-          <div class="upload-filename" id="jd-name">No file selected</div>
-        </div>
-
-      </div>
-
-      <div class="analyze-row">
-        <button class="analyze-btn" id="analyze-btn" disabled>
-          <span class="analyze-btn-text">Generate My Pathway</span>
-          <span class="analyze-btn-icon">→</span>
-        </button>
-        <div class="analyze-note">Resume is required. Job description is optional. Analysis takes 5–15 seconds depending on document length.</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ========================= LOADING ========================= -->
-  <div class="loading-overlay" id="loading-overlay" hidden>
-    <div class="loading-box">
-      <div class="loading-spinner"></div>
-      <div class="loading-steps" id="loading-steps">
-        <div class="loading-step active" id="step-parse">⏳ Parsing documents...</div>
-        <div class="loading-step" id="step-extract">🧠 Extracting skills with LLM...</div>
-        <div class="loading-step" id="step-gap">📊 Computing skill gaps...</div>
-        <div class="loading-step" id="step-path">🗺️ Building learning pathway...</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ========================= RESULTS ========================= -->
-  <section class="results-section" id="results-section" hidden>
-    <div class="container">
-
-      <!-- Summary Bar -->
-      <div class="summary-bar" id="summary-bar">
-        <div class="summary-item">
-          <span class="summary-val" id="sum-role">—</span>
-          <span class="summary-label">Target Role</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-val" id="sum-coverage">—%</span>
-          <span class="summary-label">Current Coverage</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-val" id="sum-gaps">—</span>
-          <span class="summary-label">Gaps Identified</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-val" id="sum-weeks">—</span>
-          <span class="summary-label">Est. Weeks</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-val" id="sum-hours">—h</span>
-          <span class="summary-label">Total Learning Hours</span>
-        </div>
-      </div>
-
-      <!-- Two-column: Skills + Gap Chart -->
-      <div class="results-grid">
-
-        <!-- Left: Candidate Profile -->
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-icon">👤</span>
-            <span class="panel-title">Your Skill Profile</span>
+  <main>
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy reveal">
+          <div class="eyebrow">ARTPARK x CodeForge</div>
+          <h1>Make career analysis feel like a product, not a report.</h1>
+          <p>
+            Upload a resume and optional job description to generate a visual onboarding brief,
+            structured skill-gap analysis, and an interactive role-to-skill network instead of a static image dump.
+          </p>
+          <div class="hero-actions">
+            <a class="hero-btn hero-btn--primary" href="#upload-section">Start Analysis</a>
+            <a class="hero-btn hero-btn--ghost" href="#results-section">See Output Layout</a>
           </div>
-          <div class="panel-body">
-            <div class="candidate-meta" id="candidate-meta"></div>
-            <div class="skills-list" id="resume-skills-list"></div>
+          <div class="hero-metrics">
+            <div class="metric-pill"><strong>Structured</strong><span>native frontend cards</span></div>
+            <div class="metric-pill"><strong>Interactive</strong><span>skills and jobs graph</span></div>
+            <div class="metric-pill"><strong>Grounded</strong><span>backend-driven reasoning</span></div>
+          </div>
+        </div>
+        <div class="hero-visual reveal">
+          <div class="hero-orb hero-orb--one"></div>
+          <div class="hero-orb hero-orb--two"></div>
+          <div class="hero-panel glass">
+            <div class="mini-header">
+              <span>Readiness</span>
+              <span class="mini-tag">Live frontend</span>
+            </div>
+            <div class="mini-score">
+              <div class="mini-ring"><span>86%</span></div>
+              <div>
+                <h3>Product-facing career intelligence</h3>
+                <p>Visual cards, gap ranking, roadmap sequencing, and graph exploration in one interface.</p>
+              </div>
+            </div>
+            <div class="mini-bars">
+              <div><label>Technical fit</label><span></span></div>
+              <div><label>Role alignment</label><span></span></div>
+              <div><label>Pathway clarity</label><span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="upload-section" id="upload-section">
+      <div class="container">
+        <div class="section-heading reveal">
+          <span class="eyebrow">Step 1</span>
+          <h2>Upload documents for a richer frontend briefing</h2>
+        </div>
+        <div class="upload-shell glass reveal">
+          <div class="upload-grid">
+            <div class="upload-card" id="resume-drop-zone">
+              <div class="upload-icon">Resume</div>
+              <h3>Resume / CV</h3>
+              <p>PDF, DOCX, TXT, or Markdown. Required.</p>
+              <label class="upload-btn" for="resume-input">Choose File</label>
+              <input type="file" id="resume-input" accept=".pdf,.docx,.doc,.txt,.md" hidden />
+              <div class="upload-filename" id="resume-name">No file selected</div>
+            </div>
+            <div class="upload-card" id="jd-drop-zone">
+              <div class="upload-icon">Role</div>
+              <h3>Job Description</h3>
+              <p>Optional, but helps sharpen benchmark priorities.</p>
+              <label class="upload-btn" for="jd-input">Choose File</label>
+              <input type="file" id="jd-input" accept=".pdf,.docx,.doc,.txt,.md" hidden />
+              <div class="upload-filename" id="jd-name">No file selected</div>
+            </div>
+          </div>
+          <div class="analyze-row">
+            <button class="analyze-btn" id="analyze-btn" disabled>Generate Interactive Brief</button>
+            <p class="analyze-note">The generated frontend view will replace the old PNG summary with live charts, cards, and graph interactions.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="loading-overlay" id="loading-overlay" hidden>
+      <div class="loading-card glass">
+        <div class="loader-ring"></div>
+        <div class="loading-steps">
+          <div class="loading-step active" id="step-parse">Parsing documents</div>
+          <div class="loading-step" id="step-extract">Extracting signals</div>
+          <div class="loading-step" id="step-gap">Ranking gaps</div>
+          <div class="loading-step" id="step-graph">Building graph</div>
+        </div>
+      </div>
+    </div>
+
+    <section class="results-section" id="results-section" hidden>
+      <div class="container">
+        <div class="results-hero glass reveal">
+          <div>
+            <div class="eyebrow">Step 2</div>
+            <h2 id="result-headline">Interactive onboarding brief</h2>
+            <p id="result-subtitle">Your analysis appears here once processing finishes.</p>
+          </div>
+          <div class="readiness-spotlight" id="readiness-spotlight">
+            <div class="readiness-ring" id="readiness-ring"><span id="readiness-percent">0%</span></div>
+            <div>
+              <div class="readiness-grade" id="readiness-grade">-</div>
+              <div class="readiness-label" id="readiness-label">Waiting for analysis</div>
+            </div>
           </div>
         </div>
 
-        <!-- Right: Gap Radar Chart -->
-        <div class="panel">
-          <div class="panel-header">
-            <span class="panel-icon">📡</span>
-            <span class="panel-title">Skill Gap Radar</span>
+        <div class="summary-grid reveal" id="summary-grid">
+          <div class="stat-card glass"><span>Target role</span><strong id="sum-role">-</strong></div>
+          <div class="stat-card glass"><span>Coverage</span><strong id="sum-coverage">0%</strong></div>
+          <div class="stat-card glass"><span>Skill gaps</span><strong id="sum-gaps">0</strong></div>
+          <div class="stat-card glass"><span>Roadmap</span><strong id="sum-weeks">0 weeks</strong></div>
+          <div class="stat-card glass"><span>Learning time</span><strong id="sum-hours">0h</strong></div>
+          <div class="stat-card glass"><span>Sector</span><strong id="sum-sector">-</strong></div>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="card card--profile glass reveal">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow eyebrow--small">Profile</span>
+                <h3>Candidate overview</h3>
+              </div>
+            </div>
+            <div id="candidate-meta" class="candidate-meta"></div>
+            <div id="candidate-skills" class="skill-cloud"></div>
+          </section>
+
+          <section class="card glass reveal">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow eyebrow--small">Charts</span>
+                <h3>Current vs required skills</h3>
+              </div>
+            </div>
+            <div class="chart-wrap"><canvas id="gap-radar-chart"></canvas></div>
+          </section>
+
+          <section class="card glass reveal">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow eyebrow--small">Breakdown</span>
+                <h3>Fit composition</h3>
+              </div>
+            </div>
+            <div class="chart-wrap chart-wrap--compact"><canvas id="fit-donut-chart"></canvas></div>
+            <div class="mini-summary" id="fit-breakdown"></div>
+          </section>
+        </div>
+
+        <div class="insight-grid">
+          <section class="card glass reveal">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow eyebrow--small">Gaps</span>
+                <h3>Priority gaps to close</h3>
+              </div>
+            </div>
+            <div class="gap-list" id="gap-list"></div>
+          </section>
+
+          <section class="card glass reveal">
+            <div class="card-header">
+              <div>
+                <span class="eyebrow eyebrow--small">Roles</span>
+                <h3>Recommended adjacent roles</h3>
+              </div>
+            </div>
+            <div class="recommendation-list" id="recommendation-list"></div>
+          </section>
+        </div>
+
+        <section class="card glass reveal">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow eyebrow--small">Reasoning</span>
+              <h3>Grounded narrative</h3>
+            </div>
           </div>
-          <div class="panel-body chart-panel-body">
-            <canvas id="gap-radar-chart"></canvas>
+          <div class="reasoning-block">
+            <p id="gap-reasoning"></p>
+            <p id="pathway-reasoning"></p>
           </div>
-        </div>
+        </section>
 
+        <section class="card glass reveal graph-section">
+          <div class="card-header graph-header">
+            <div>
+              <span class="eyebrow eyebrow--small">Network</span>
+              <h3>Jobs, skills, and prerequisite graph</h3>
+            </div>
+            <div class="graph-legend">
+              <span><i class="legend-dot legend-dot--target"></i>Target role</span>
+              <span><i class="legend-dot legend-dot--recommended"></i>Recommended role</span>
+              <span><i class="legend-dot legend-dot--skill"></i>Existing skill</span>
+              <span><i class="legend-dot legend-dot--gap"></i>Gap skill</span>
+              <span><i class="legend-dot legend-dot--foundation"></i>Prerequisite</span>
+            </div>
+          </div>
+          <div class="graph-stage">
+            <canvas id="skill-graph-canvas" width="1200" height="640"></canvas>
+            <div class="graph-tooltip" id="graph-tooltip" hidden></div>
+          </div>
+        </section>
+
+        <section class="card glass reveal">
+          <div class="card-header">
+            <div>
+              <span class="eyebrow eyebrow--small">Roadmap</span>
+              <h3>Learning pathway</h3>
+            </div>
+          </div>
+          <div class="roadmap-list" id="roadmap-list"></div>
+        </section>
+
+        <div class="reset-row reveal">
+          <button class="secondary-btn" id="reset-btn">Analyze Another Resume</button>
+        </div>
       </div>
+    </section>
+  </main>
 
-      <!-- Reasoning Trace -->
-      <div class="panel reasoning-panel">
-        <div class="panel-header">
-          <span class="panel-icon">🔍</span>
-          <span class="panel-title">Reasoning Trace</span>
-          <span class="panel-tag">Grounded Analysis</span>
-        </div>
-        <div class="panel-body">
-          <p class="reasoning-text" id="gap-reasoning"></p>
-          <p class="reasoning-text" id="pathway-reasoning"></p>
-        </div>
-      </div>
-
-      <!-- Learning Pathway -->
-      <div class="section-label" style="margin-top:3rem;">Step 2 — Your Personalized Pathway</div>
-
-      <div class="pathway-container" id="pathway-container">
-        </div>
-
-      <div class="panel" id="visual-results-container" style="display: none; margin-top: 3rem;">
-        <div class="panel-header">
-          <span class="panel-icon">📊</span>
-          <span class="panel-title">Visual Onboarding Dashboard</span>
-          <span class="panel-tag">Matplotlib Engine</span>
-        </div>
-        <div class="panel-body" style="padding: 1rem;">
-          <img id="dashboard-image" src="" alt="Candidate Dashboard" style="width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />
-        </div>
-      </div>
-      
-      <div class="reset-row">
-        <button class="reset-btn" id="reset-btn">← Analyze Another</button>
-      </div>
-
-    </div>
-  </section>
-
-  <!-- ========================= ERROR TOAST ========================= -->
   <div class="toast" id="error-toast" hidden>
-    <span class="toast-icon">⚠</span>
-    <span class="toast-msg" id="toast-msg">Something went wrong.</span>
-    <button class="toast-close" id="toast-close">✕</button>
+    <span id="toast-msg">Something went wrong.</span>
+    <button id="toast-close" class="toast-close" type="button">Close</button>
   </div>
-
-  <!-- ========================= FOOTER ========================= -->
-  <footer class="footer">
-    <div class="footer-inner">
-      <span>AURORA — ARTPARK × CodeForge 2026</span>
-      <span class="footer-sep">·</span>
-      <span>Graph-based Adaptive Learning Engine</span>
-      <span class="footer-sep">·</span>
-      <a href="http://localhost:8000/docs" target="_blank" class="footer-link">API Docs</a>
-    </div>
-  </footer>
 
   <script src="app.js"></script>
 </body>

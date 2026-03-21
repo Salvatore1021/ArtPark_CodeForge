@@ -14,8 +14,6 @@ Usage
 
 from __future__ import annotations
 import argparse
-import base64
-import io
 import sys
 import tempfile
 from pathlib import Path
@@ -26,7 +24,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
-from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
+from taxonomy_adapter import (
+    list_sectors,
+    list_jobs,
+    find_job_title,
+    build_weighted_benchmark_text,
+    get_job_benchmark,
+    get_sector,
+)
 from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
 from skill_extractor import (
     FULL_SKILL_LIBRARY,
@@ -35,7 +40,7 @@ from skill_extractor import (
     build_and_fit_vectorizer,
     precompute_skill_vectors,
 )
-from dependency_graph import build_skill_dependency_graph
+from dependency_graph import build_skill_dependency_graph, get_prerequisites
 from candidate_evaluator import evaluate_candidate, batch_evaluate
 from gap_prioritizer import prioritize_gaps
 from roadmap_builder import build_roadmap
@@ -200,7 +205,6 @@ def _build_api_payload(
     recommendations: list[dict],
     benchmark: dict[str, float],
     llm_output: dict | None,
-    dashboard_base64: str | None = None,
 ) -> dict:
     confidence_scores = metrics.get("Confidence_Scores", {})
     llm_lookup = {
@@ -235,6 +239,10 @@ def _build_api_payload(
             "objective": row["Objective"],
             "success": row["Success"],
             "weight": row["ONET_Weight"],
+            "priority": next(
+                (gap["Priority"] for gap in metrics.get("Prioritized_Gaps", []) if gap["Skill"].lower() == row["Skill"].lower()),
+                None,
+            ),
         }
         for _, row in roadmap_df.iterrows()
     ]
@@ -247,10 +255,110 @@ def _build_api_payload(
             "importance": _importance_label(gap["ONET_Weight"]),
             "weight": gap["ONET_Weight"],
             "level": gap["Level"],
+            "gap_score": gap.get("Gap_Score", 0.0),
         }
         for gap in metrics.get("Prioritized_Gaps", [])[:12]
     ]
     estimated_weeks = len(roadmap)
+
+    split = metrics.get("Split_Details", {})
+    recommended_roles = [
+        {
+            "title": rec["job_title"],
+            "sector": rec["sector"],
+            "match_pct": round(rec["composite"] * 100),
+            "matched_skills": [s.title() for s in rec.get("matched_skills", [])[:5]],
+            "gap_skills": [s.title() for s in rec.get("gap_skills", [])[:4]],
+        }
+        for rec in recommendations[:3]
+    ]
+
+    benchmark_lookup = {skill.lower(): weight for skill, weight in benchmark.items()}
+    candidate_lookup = {skill["skill_name"].lower(): skill for skill in candidate_skills}
+    graph_nodes: list[dict] = []
+    graph_edges: list[dict] = []
+    skill_graph = build_skill_dependency_graph()
+
+    def add_node(node_id: str, label: str, group: str, **extra) -> None:
+        node = {"id": node_id, "label": label, "group": group}
+        node.update(extra)
+        graph_nodes.append(node)
+
+    target_role_title = metrics.get("Job_Title", "")
+    add_node(
+        "role:target",
+        target_role_title,
+        "target-role",
+        sector=get_sector(target_role_title) or "Professional",
+        readiness=metrics.get("Grade", ""),
+    )
+
+    for idx, rec in enumerate(recommendations[:3], start=1):
+        rec_id = f"role:recommended:{idx}"
+        add_node(
+            rec_id,
+            rec["job_title"],
+            "recommended-role",
+            sector=rec["sector"],
+            match_pct=round(rec["composite"] * 100),
+        )
+        graph_edges.append({
+            "source": "role:target",
+            "target": rec_id,
+            "type": "role-match",
+            "strength": round(rec["composite"], 4),
+        })
+
+    top_graph_skills = []
+    seen_graph_skills = set()
+    for skill_name, weight in sorted(benchmark.items(), key=lambda item: item[1], reverse=True):
+        key = skill_name.lower()
+        if key in seen_graph_skills:
+            continue
+        seen_graph_skills.add(key)
+        top_graph_skills.append((skill_name, weight))
+        if len(top_graph_skills) >= 8:
+            break
+
+    highlighted_gaps = {gap["skill"].lower() for gap in prioritized_gaps[:6]}
+    for skill_name, weight in top_graph_skills:
+        skill_key = skill_name.lower()
+        candidate_info = candidate_lookup.get(skill_key)
+        is_gap = skill_key in highlighted_gaps or skill_key not in candidate_lookup
+        skill_node_id = f"skill:{skill_key}"
+        add_node(
+            skill_node_id,
+            skill_name.title(),
+            "gap-skill" if is_gap else "candidate-skill",
+            weight=round(float(weight), 2),
+            proficiency=(candidate_info or {}).get("proficiency_level", 0),
+            confidence=(candidate_info or {}).get("confidence", 0.0),
+        )
+        graph_edges.append({
+            "source": "role:target",
+            "target": skill_node_id,
+            "type": "requires-skill",
+            "strength": round(float(weight) / 5.0, 4),
+        })
+
+        for prereq in get_prerequisites(skill_graph, skill_key)[:3]:
+            prereq_node_id = f"skill:{prereq}"
+            if not any(node["id"] == prereq_node_id for node in graph_nodes):
+                add_node(
+                    prereq_node_id,
+                    prereq.title(),
+                    "foundation-skill",
+                    weight=round(float(benchmark_lookup.get(prereq, 2.5)), 2),
+                    proficiency=(candidate_lookup.get(prereq) or {}).get("proficiency_level", 0),
+                    confidence=(candidate_lookup.get(prereq) or {}).get("confidence", 0.0),
+                )
+            graph_edges.append({
+                "source": prereq_node_id,
+                "target": skill_node_id,
+                "type": "prerequisite",
+                "strength": 0.7,
+            })
+
     return {
         "candidate_profile": {
             "name": profile.get("name") or f"Candidate {metrics['ID']}",
@@ -268,22 +376,48 @@ def _build_api_payload(
             "weeks": estimated_weeks,
             "readiness_label": _readiness_label(metrics.get("Grade", "")),
             "readiness_grade": metrics.get("Grade", ""),
+            "technical_fit_pct": round(split.get("hard_fit", 0.0) * 100),
+            "soft_fit_pct": round(split.get("soft_fit", 0.0) * 100),
+            "technical_weight_pct": round(split.get("hard_weight", 0.0) * 100),
+            "soft_weight_pct": round(split.get("soft_weight", 0.0) * 100),
+            "estimated_hours": estimated_weeks * 6,
         },
         "target_role": {
             "title": metrics.get("Job_Title", ""),
             "required_skills": required_skills,
+            "sector": get_sector(metrics.get("Job_Title", "")) or "Professional",
         },
         "gap_analysis": {
             "prioritized_gaps": prioritized_gaps,
             "reasoning": f"{len(metrics.get('Gaps', []))} skill gaps identified and prioritized by dependency level, importance, and confidence.",
+            "gap_summary": {
+                "coverage_pct": round(metrics.get("Composite_Score", 0.0) * 100),
+                "total_gaps": len(metrics.get("Gaps", [])),
+            },
         },
-        "recommendations": recommendations[:3],
+        "recommendations": recommended_roles,
         "learning_pathway": {
             "estimated_weeks": estimated_weeks,
             "roadmap": roadmap,
             "reasoning_summary": metrics.get("Pathway_Depth", ""),
+            "estimated_total_hours": estimated_weeks * 6,
         },
-        "dashboard_base64": dashboard_base64,
+        "visual_breakdown": {
+            "readiness": {
+                "grade": metrics.get("Grade", ""),
+                "label": _readiness_label(metrics.get("Grade", "")),
+                "coverage_pct": round(metrics.get("Composite_Score", 0.0) * 100),
+                "technical_fit_pct": round(split.get("hard_fit", 0.0) * 100),
+                "soft_fit_pct": round(split.get("soft_fit", 0.0) * 100),
+            },
+            "recommendations": recommended_roles,
+            "top_strengths": [skill["skill_name"] for skill in candidate_skills[:8]],
+            "top_gaps": [gap["skill"] for gap in prioritized_gaps[:8]],
+        },
+        "graph": {
+            "nodes": graph_nodes,
+            "edges": graph_edges,
+        },
     }
 
 
@@ -372,26 +506,6 @@ def _run_analysis_for_api(
     for skill, info in metrics.get("Confidence_Scores", {}).items():
         benchmark.setdefault(skill, info.get("onet_weight", 0.0))
 
-    figure = generate_dashboard(
-        metrics,
-        graph,
-        recommendations,
-        profile=profile,
-        save_path=None,
-        show=False,
-    )
-    dashboard_base64 = None
-    if figure is not None:
-        buffer = io.BytesIO()
-        figure.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
-        buffer.seek(0)
-        dashboard_base64 = base64.b64encode(buffer.read()).decode("ascii")
-        try:
-            import matplotlib.pyplot as plt
-            plt.close(figure)
-        except Exception:
-            pass
-
     return _build_api_payload(
         metrics,
         profile,
@@ -399,7 +513,6 @@ def _run_analysis_for_api(
         recommendations,
         benchmark,
         llm_output,
-        dashboard_base64=dashboard_base64,
     )
 
 
@@ -881,7 +994,10 @@ async def analyze_resume_visual(
             category=category,
             job_title=job_title,
         )
-        return {"dashboard_base64": payload.get("dashboard_base64")}
+        return {
+            "visual_breakdown": payload.get("visual_breakdown", {}),
+            "graph": payload.get("graph", {}),
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
