@@ -22,7 +22,7 @@ import pandas as pd
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
 from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
 from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
-from skill_extractor import FULL_SKILL_LIBRARY, extract_all_skills, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors
+from skill_extractor import FULL_SKILL_LIBRARY, extract_all_skills, build_and_fit_vectorizer, precompute_skill_vectors
 from dependency_graph import build_skill_dependency_graph
 from candidate_evaluator import evaluate_candidate, batch_evaluate
 from gap_prioritizer import prioritize_gaps
@@ -135,6 +135,10 @@ def _print_readiness(metrics: dict) -> None:
 
 def _print_skills(metrics: dict, job_title: str) -> None:
     _section("SKILLS IDENTIFIED IN YOUR CV")
+
+    from skill_classifier import classify_skill
+    tech_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "hard"])
+    soft_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "soft"])
 
     extracted    = sorted(metrics.get("Extracted_Skills", []))
     conf_scores  = metrics.get("Confidence_Scores", {})
@@ -281,7 +285,7 @@ def _run_pipeline(
  
     # ── Role recommendations ──────────────────────────────────────────────────
     resume_text     = str(cand_series.get("Resume_str", ""))
-    recommendations = recommend_roles(resume_text, vectorizer, top_n=3, min_match_count=1)
+    recommendations = recommend_roles(["Extracted_Skills"], top_n=3, min_match_count=1)
  
     # ── Roadmap ───────────────────────────────────────────────────────────────
     roadmap_df = build_roadmap(metrics)
@@ -378,10 +382,6 @@ def run_single_pdf(
     job_text  = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
  
-    extra = [build_weighted_benchmark_text(job_title)]
-    vec   = build_and_fit_vectorizer(pdf_df, job_text, FULL_SKILL_LIBRARY,
-                                     extra_benchmark_texts=extra)
-    svecs = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
     graph = build_skill_dependency_graph()
  
     # Steps 5–6: job matching → gap analysis → roadmap
@@ -415,9 +415,6 @@ def run_single_csv(
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
 
     extra    = [build_weighted_benchmark_text(resolved)]
-    vec      = build_and_fit_vectorizer(df, job_text, FULL_SKILL_LIBRARY,
-                                         extra_benchmark_texts=extra)
-    svecs    = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
     graph    = build_skill_dependency_graph()
 
     _run_pipeline(
@@ -455,13 +452,6 @@ def run_batch(csv_path: str, job_pdf_path: str) -> None:
     pd.DataFrame(rows).to_csv(out, index=False)
     print(pd.DataFrame(rows).to_string(index=False))
     print(f"\nResults saved to {out}")
-
-
-def _quick_vectorizer(df, job_text):
-    vec   = build_and_fit_vectorizer(df, job_text, FULL_SKILL_LIBRARY)
-    svecs = precompute_skill_vectors(vec, FULL_SKILL_LIBRARY)
-    return vec, svecs
-
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 

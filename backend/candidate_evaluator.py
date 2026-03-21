@@ -239,11 +239,8 @@ def evaluate_candidate(
     else:
         bench_text = build_benchmark_text(job_title, top_n=BENCHMARK_TOP_N)
 
-    bench_vec = vectorizer.transform([bench_text])
-    wt_cosine = float(cosine_similarity(cand_vec, bench_vec)[0][0])   # fix: [0][0]
-
     # ── Composite, grade, pathway ─────────────────────────────────────────────
-    composite     = (weighted_fit + wt_cosine) / 2
+    composite     = weighted_fit
     grade         = determine_grade(composite)
     pathway_depth = (
         "Fundamental & Comprehensive"
@@ -289,7 +286,6 @@ def evaluate_candidate(
         "Gaps":                sorted(gap_weights.keys()),
         "Gap_Weights":         gap_weights,
         "Extracted_Skills":    sorted(extracted_set),
-        "_cand_vec":           cand_vec,
     }
 
 

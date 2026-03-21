@@ -20,29 +20,9 @@ import networkx as nx
 from dependency_graph import get_skill_level
 
 
-def calculate_robust_similarity(
-    resume_vector,
-    skill_name: str,
-    skill_vectors: dict,
-    epsilon: float = 1e-6,
-) -> float:
-    try:
-        skill_vec = skill_vectors.get(skill_name.lower())
-        if skill_vec is None:
-            return 0.0
-        if resume_vector.nnz == 0:
-            return epsilon
-        sim = cosine_similarity(resume_vector, skill_vec)[0][0]
-        return float(sim) if not np.isnan(sim) else epsilon
-    except Exception:
-        return 0.0
-
-
 def prioritize_gaps(
     gaps: list[str],
     gap_weights: dict[str, float],
-    resume_vector,
-    skill_vectors: dict,
     graph: nx.DiGraph,
     confidence_scores: dict | None = None,
 ) -> list[dict]:
