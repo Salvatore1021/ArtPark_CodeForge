@@ -14,10 +14,16 @@ Usage
 
 from __future__ import annotations
 import argparse
+import base64
+import io
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
 from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
@@ -36,7 +42,7 @@ from roadmap_builder import build_roadmap
 from dashboard import generate_dashboard
 from role_recommender import recommend_roles
 from report_exporter import export_all
-from skill_classifier import split_benchmark, get_category_type
+from skill_classifier import classify_skill, split_benchmark, get_category_type
 
 
 
@@ -91,6 +97,273 @@ def _prepare_vectorizer(
     return vectorizer, skill_vectors
 
 
+def _proficiency_to_level(proficiency: str) -> int:
+    return {
+        "beginner": 1,
+        "intermediate": 3,
+        "advanced": 4,
+        "expert": 5,
+    }.get((proficiency or "").lower(), 2)
+
+
+def _weight_to_required_level(weight: float) -> int:
+    if weight >= 3.75:
+        return 5
+    if weight >= 3.25:
+        return 4
+    if weight >= 2.75:
+        return 3
+    if weight >= 2.25:
+        return 2
+    return 1
+
+
+def _extract_text_from_upload(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    if suffix == ".pdf":
+        return extract_text_from_pdf(file_path)
+    if suffix == ".txt" or suffix == ".md":
+        return file_path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == ".docx":
+        try:
+            from docx import Document
+        except ImportError as exc:
+            raise RuntimeError("DOCX support requires python-docx to be installed.") from exc
+        document = Document(str(file_path))
+        return "\n".join(p.text for p in document.paragraphs).strip()
+    raise RuntimeError(f"Unsupported file type: {suffix}. Use PDF, DOCX, TXT, or MD.")
+
+
+def _parse_resume_upload(file_path: Path) -> dict:
+    if file_path.suffix.lower() == ".pdf":
+        return parse_resume_pdf(file_path)
+
+    text = _extract_text_from_upload(file_path)
+    return {
+        "name": file_path.stem.replace("_", " ").strip() or "Candidate",
+        "email": None,
+        "phone": None,
+        "linkedin": None,
+        "github": None,
+        "summary_text": "",
+        "education": [],
+        "experience": [],
+        "skills_raw": "",
+        "certifications": [],
+        "projects": [],
+        "full_text": text,
+    }
+
+
+def _build_api_payload(
+    metrics: dict,
+    profile: dict,
+    roadmap_df: pd.DataFrame,
+    recommendations: list[dict],
+    benchmark: dict[str, float],
+    llm_output: dict | None,
+    dashboard_base64: str | None = None,
+) -> dict:
+    confidence_scores = metrics.get("Confidence_Scores", {})
+    llm_lookup = {
+        s["skill"].lower(): s for s in (llm_output or {}).get("skills", [])
+    }
+
+    candidate_skills = []
+    for skill in metrics.get("Extracted_Skills", []):
+        info = confidence_scores.get(skill.lower(), {})
+        llm_skill = llm_lookup.get(skill.lower(), {})
+        candidate_skills.append({
+            "skill_name": skill.title(),
+            "proficiency_level": _proficiency_to_level(llm_skill.get("proficiency", "")),
+            "confidence": round(float(info.get("confidence", 0.0)), 2),
+            "evidence": llm_skill.get("reasoning", ""),
+        })
+
+    required_skills = [
+        {
+            "skill_name": skill.title(),
+            "required_level": _weight_to_required_level(weight),
+            "importance": _importance_label(weight),
+            "weight": round(float(weight), 2),
+        }
+        for skill, weight in sorted(benchmark.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+
+    roadmap = [
+        {
+            "week": row["Week"],
+            "skill": row["Skill"].title(),
+            "objective": row["Objective"],
+            "success": row["Success"],
+            "weight": row["ONET_Weight"],
+        }
+        for _, row in roadmap_df.iterrows()
+    ]
+
+    prioritized_gaps = [
+        {
+            "priority": gap["Priority"],
+            "skill": gap["Skill"].title(),
+            "type": "Technical" if classify_skill(gap["Skill"], metrics.get("Job_Title", "")) == "hard" else "Soft Skill",
+            "importance": _importance_label(gap["ONET_Weight"]),
+            "weight": gap["ONET_Weight"],
+            "level": gap["Level"],
+        }
+        for gap in metrics.get("Prioritized_Gaps", [])[:12]
+    ]
+    estimated_weeks = len(roadmap)
+    return {
+        "candidate_profile": {
+            "name": profile.get("name") or f"Candidate {metrics['ID']}",
+            "email": profile.get("email"),
+            "phone": profile.get("phone"),
+            "linkedin": profile.get("linkedin"),
+            "education": profile.get("education", []),
+            "experience": profile.get("experience", []),
+            "skills": candidate_skills,
+        },
+        "summary": {
+            "target_role": metrics.get("Job_Title", ""),
+            "coverage_pct": round(metrics.get("Composite_Score", 0.0) * 100),
+            "gaps": len(metrics.get("Gaps", [])),
+            "weeks": estimated_weeks,
+            "readiness_label": _readiness_label(metrics.get("Grade", "")),
+            "readiness_grade": metrics.get("Grade", ""),
+        },
+        "target_role": {
+            "title": metrics.get("Job_Title", ""),
+            "required_skills": required_skills,
+        },
+        "gap_analysis": {
+            "prioritized_gaps": prioritized_gaps,
+            "reasoning": f"{len(metrics.get('Gaps', []))} skill gaps identified and prioritized by dependency level, importance, and confidence.",
+        },
+        "recommendations": recommendations[:3],
+        "learning_pathway": {
+            "estimated_weeks": estimated_weeks,
+            "roadmap": roadmap,
+            "reasoning_summary": metrics.get("Pathway_Depth", ""),
+        },
+        "dashboard_base64": dashboard_base64,
+    }
+
+
+def _run_analysis_for_api(
+    resume_path: Path,
+    job_description_path: Path | None = None,
+    category: str | None = None,
+    job_title: str | None = None,
+) -> dict:
+    profile = _parse_resume_upload(resume_path)
+    row_dict = resume_profile_to_dataframe_row(profile)
+    resume_text = profile.get("full_text", "")
+    if not resume_text.strip():
+        raise RuntimeError("The uploaded resume could not be read.")
+
+    llm_output = None
+    extracted_skills = []
+    try:
+        llm_output = extract_all_skills(profile)
+        extracted_skills = [s["skill"] for s in llm_output.get("skills", [])]
+    except Exception:
+        extracted_skills = extract_skills(resume_text, FULL_SKILL_LIBRARY)
+
+    row_dict["Extracted_Skills"] = extracted_skills
+    row_dict["Category"] = category or job_title or "UPLOADED_PDF"
+    cand_series = pd.Series(row_dict)
+
+    resume_df = pd.DataFrame([{
+        "ID": row_dict["ID"],
+        "Category": row_dict["Category"],
+        "Resume_str": resume_text,
+        "Extracted_Skills": extracted_skills, 
+    }])
+
+    vec, svecs = _prepare_vectorizer(resume_df)
+    recommendations = recommend_roles(
+        resume_text,
+        vec,
+        top_n=3,
+        min_match_count=1,
+        candidate_id=row_dict["ID"],
+    )
+
+    resolved_job_title = job_title
+    if not resolved_job_title and category:
+        resolved_job_title = find_job_title(category) or category
+    if not resolved_job_title:
+        resolved_job_title = recommendations[0]["job_title"] if recommendations else "Software Engineer"
+
+    job_text = ""
+    jd_skills = None
+    if job_description_path is not None:
+        job_text = _extract_text_from_upload(job_description_path)
+        if job_text.strip():
+            jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY)
+
+    vec, svecs = _prepare_vectorizer(
+        resume_df,
+        job_text,
+        [build_weighted_benchmark_text(resolved_job_title)],
+    )
+    graph = build_skill_dependency_graph()
+
+    metrics = evaluate_candidate(
+        cand_series,
+        vec,
+        svecs,
+        category=resolved_job_title,
+        jd_skills=jd_skills,
+        llm_json=llm_output,
+    )
+    cand_vec = metrics.pop("_cand_vec")
+    metrics["Prioritized_Gaps"] = prioritize_gaps(
+        metrics["Gaps"],
+        metrics["Gap_Weights"],
+        graph,
+        cand_vec,
+        svecs,
+        confidence_scores=metrics.get("Confidence_Scores"),
+    )
+    roadmap_df = build_roadmap(metrics)
+    metrics["Duration"] = len(roadmap_df)
+
+    benchmark = metrics.get("Gap_Weights", {}).copy()
+    for skill, info in metrics.get("Confidence_Scores", {}).items():
+        benchmark.setdefault(skill, info.get("onet_weight", 0.0))
+
+    figure = generate_dashboard(
+        metrics,
+        graph,
+        recommendations,
+        profile=profile,
+        save_path=None,
+        show=False,
+    )
+    dashboard_base64 = None
+    if figure is not None:
+        buffer = io.BytesIO()
+        figure.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+        buffer.seek(0)
+        dashboard_base64 = base64.b64encode(buffer.read()).decode("ascii")
+        try:
+            import matplotlib.pyplot as plt
+            plt.close(figure)
+        except Exception:
+            pass
+
+    return _build_api_payload(
+        metrics,
+        profile,
+        roadmap_df,
+        recommendations,
+        benchmark,
+        llm_output,
+        dashboard_base64=dashboard_base64,
+    )
+
+
 # ── Core display functions ────────────────────────────────────────────────────
 
 def _print_candidate_profile(profile: dict | None, cand_id, category: str, job_title: str) -> None:
@@ -121,7 +394,7 @@ def _print_candidate_profile(profile: dict | None, cand_id, category: str, job_t
         "CREATIVE": "Arts & Creative",
         "NON_TECH": "Professional Services",
     }.get(cat_type, cat_type)
-
+    
     print(f"  Target Role   :  {job_title}")
     print(f"  Industry      :  {sector}")
     print(f"  Category      :  {cat_label}")
@@ -500,6 +773,82 @@ def run_recommend_only(resume_pdf_path: str, save: bool = True) -> None:
         candidate_id=row_dict["ID"],
     )
     _print_recommendations(recommendations)
+
+
+app = FastAPI(title="AURORA Backend", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+async def _persist_upload(upload: UploadFile | None) -> Path | None:
+    if upload is None:
+        return None
+
+    suffix = Path(upload.filename or "").suffix or ".tmp"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await upload.read())
+        return Path(tmp.name)
+
+
+@app.get("/health")
+def healthcheck() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/analyze")
+async def analyze_resume(
+    resume: UploadFile = File(...),
+    job_description: UploadFile | None = File(default=None),
+    category: str | None = Form(default=None),
+    job_title: str | None = Form(default=None),
+):
+    resume_path = await _persist_upload(resume)
+    jd_path = await _persist_upload(job_description)
+    try:
+        return JSONResponse(
+            _run_analysis_for_api(
+                resume_path=resume_path,
+                job_description_path=jd_path,
+                category=category,
+                job_title=job_title,
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        for path in [resume_path, jd_path]:
+            if path and path.exists():
+                path.unlink(missing_ok=True)
+
+
+@app.post("/analyze/visual")
+async def analyze_resume_visual(
+    resume: UploadFile = File(...),
+    job_description: UploadFile | None = File(default=None),
+    category: str | None = Form(default=None),
+    job_title: str | None = Form(default=None),
+):
+    resume_path = await _persist_upload(resume)
+    jd_path = await _persist_upload(job_description)
+    try:
+        payload = _run_analysis_for_api(
+            resume_path=resume_path,
+            job_description_path=jd_path,
+            category=category,
+            job_title=job_title,
+        )
+        return {"dashboard_base64": payload.get("dashboard_base64")}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        for path in [resume_path, jd_path]:
+            if path and path.exists():
+                path.unlink(missing_ok=True)
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 

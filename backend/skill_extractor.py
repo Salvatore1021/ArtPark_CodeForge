@@ -1,5 +1,5 @@
 """
-skill_extractor.py
+debug_extraction.py
 ------------------
 Unified skill extraction module.
 
