@@ -219,3 +219,91 @@ def extract_skills_llm(raw_text: str) -> dict:
     result["skills"]        = skills
     result["llm_available"] = True
     return result
+
+
+# ── Taxonomy mapper ───────────────────────────────────────────────────────────
+
+def map_to_taxonomy(skills: list, taxonomy_skills: list,
+                    batch_size: int = 10) -> dict:
+    """
+    Semantically map a list of extracted skills to the closest taxonomy skill
+    using Ollama. Returns a dict: { original_skill: matched_taxonomy_skill_or_None }
+
+    taxonomy_skills : flat list of all skill names from the taxonomy file.
+    """
+    # Case-insensitive lookup for validation
+    skill_lookup = {s.lower().strip(): s for s in taxonomy_skills}
+    taxonomy_str = "\n".join(f"- {s}" for s in taxonomy_skills)
+    mapping      = {}
+
+    skill_names = [s["skill"] for s in skills]
+
+    for i in range(0, len(skill_names), batch_size):
+        batch      = skill_names[i:i + batch_size]
+        resume_str = "\n".join(f"- {s}" for s in batch)
+
+        prompt = f"""You are a skill mapping expert. Map each resume skill to the single most semantically similar skill from the taxonomy list.
+
+TAXONOMY SKILLS:
+{taxonomy_str}
+
+RESUME SKILLS TO MAP:
+{resume_str}
+
+Rules:
+- Match by meaning, not spelling.
+- Examples:
+    "employee relations" -> "Management of Personnel Resources"
+    "payroll" -> "Management of Financial Resources"
+    "scheduling" -> "Time Management"
+    "hiring" -> "Management of Personnel Resources"
+    "bookkeeping" -> "Management of Financial Resources"
+    "pytorch" -> "Python"
+    "sqlite" -> "SQL"
+    "debugging" -> "Troubleshooting"
+    "coaching" -> "Instructing"
+    "document management" -> "Writing"
+    "osha reporting" -> "Quality Control Analysis"
+- Return null if there is genuinely no reasonable match.
+- Return ONLY valid JSON object. No explanation. No markdown. No preamble.
+
+Output format:
+{{
+  "resume_skill_1": "Matched Taxonomy Skill",
+  "resume_skill_2": null
+}}"""
+
+        payload = json.dumps({
+            "model":    OLLAMA_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream":   False,
+            "options":  {"temperature": 0.0, "num_predict": 512}
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        print(f"  [taxonomy] Mapping batch {i//batch_size + 1} ({len(batch)} skills)...")
+        with urllib.request.urlopen(req, timeout=120) as r:
+            raw     = json.loads(r.read())["message"]["content"]
+            cleaned = re.sub(r"```(?:json)?", "", raw).strip()
+            match   = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if match:
+                try:
+                    batch_map = json.loads(match.group())
+                    for orig, matched in batch_map.items():
+                        if matched:
+                            # Normalize to canonical casing
+                            canonical = skill_lookup.get(
+                                matched.lower().strip(), matched
+                            )
+                            mapping[orig] = canonical if canonical in taxonomy_skills else None
+                        else:
+                            mapping[orig] = None
+                except json.JSONDecodeError:
+                    pass
+
+    return mapping
