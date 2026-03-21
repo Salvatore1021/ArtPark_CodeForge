@@ -1,4 +1,4 @@
-# AURORA — Architecture & Workflow Documentation
+# SkillDeck — Architecture & Workflow Documentation
 
 ## System Components
 

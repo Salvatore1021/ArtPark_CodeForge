@@ -5,33 +5,28 @@ Scores candidates using O*NET-weighted benchmarks with category-aware
 hard/soft skill split ratios.
 
 Scoring model
-─────────────
+-------------
 1. Split-Weighted Fit
    Skills in the benchmark are classified as HARD or SOFT.
    Each group gets a sub-fit score (confidence-weighted average).
-   The two sub-scores are blended by the category ratio:
-
-     TECH:       95% hard × hard_fit + 05% soft × soft_fit
-     NON_TECH:   70% hard × hard_fit + 30% soft × soft_fit
-     MANAGEMENT: 50% hard × hard_fit + 50% soft × soft_fit
-     HEALTHCARE: 65% hard × hard_fit + 35% soft × soft_fit
-     EDUCATION:  55% hard × hard_fit + 45% soft × soft_fit
-     CREATIVE:   60% hard × hard_fit + 40% soft × soft_fit
+   The two sub-scores are blended by the category ratio.
 
 2. Weighted Cosine Similarity
-   Benchmark text repeated ∝ O*NET weight → TF-IDF cosine vs resume.
-   Retained even when LLM JSON is used — it captures semantic context
-   beyond exact skill-name matches.
+   Benchmark text repeated in proportion to O*NET weight is compared
+   against the resume with TF-IDF cosine similarity.
 
-3. Composite = (Split-Weighted Fit + Weighted Cosine) / 2
+3. Composite = 0.75 x Split-Weighted Fit + 0.25 x Weighted Cosine
+   This keeps the final percentage much closer to actual skill coverage,
+   while still using semantic document similarity as a secondary signal.
 
 Confidence source priority
-──────────────────────────
-  1. LLM JSON  (llm_json param)  — richest signal: per-skill confidence,
-     proficiency level, and direct evidence from the resume text.
-  2. TF-IDF skill vectors        — fallback when LLM is not available
-     (CSV / batch mode).
-  3. Binary extracted_set match  — last resort when neither is available.
+--------------------------
+1. LLM JSON  (llm_json param)
+   Uses directly extracted skill evidence and proficiency.
+2. TF-IDF skill vectors
+   Provides fallback confidence for adjacent or semantically similar skills.
+3. Binary extracted_set match
+   Last resort when neither of the above is available.
 """
 
 from __future__ import annotations
@@ -60,8 +55,6 @@ from skill_classifier import (
 from enhanced_taxonomy import ENHANCED_TAXONOMY_DATA
 
 
-# ── Default skill weights (built once at import) ──────────────────────────────
-
 DEFAULT_SKILL_WEIGHTS: dict[str, float] = {}
 for _domain, _roles in ENHANCED_TAXONOMY_DATA.items():
     if isinstance(_roles, dict):
@@ -74,7 +67,14 @@ for _domain, _roles in ENHANCED_TAXONOMY_DATA.items():
                     )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+PROFICIENCY_MULTIPLIER = {
+    "beginner": 0.75,
+    "intermediate": 0.9,
+    "advanced": 1.0,
+    "expert": 1.0,
+    "unknown": 0.85,
+}
+
 
 def determine_grade(score: float) -> str:
     for grade, threshold in sorted(
@@ -95,50 +95,69 @@ def resolve_job_title(category: str) -> str:
 
 def _build_confidence_from_llm(
     llm_json: dict,
-    benchmark: dict,
-) -> dict:
+    benchmark: dict[str, float],
+    resume_text: str = "",
+    extracted_skills: list[str] | None = None,
+    resume_vector=None,
+    skill_vectors: dict | None = None,
+) -> dict[str, dict]:
     """
-    Build the confidence_scores dict from LLM extraction output.
+    Build benchmark-aligned confidence scores from LLM output.
 
-    The LLM gives per-skill confidence for skills the candidate demonstrably
-    has. Benchmark skills not found in the LLM output receive confidence=0.0,
-    meaning the evaluator treats them as gaps.
-
-    Parameters
-    ----------
-    llm_json  : output of extract_all_skills() —
-                must contain a 'skills' key with list of skill dicts
-    benchmark : {skill_name: onet_weight} for the target job
-
-    Returns
-    -------
-    {
-      skill_lower: {
-        "confidence":  float,   # from LLM (0.0 if not found)
-        "onet_weight": float,   # from O*NET benchmark
-        "proficiency": str,     # from LLM ("unknown" if not found)
-      }
-    }
+    Exact benchmark matches use LLM evidence directly. When available,
+    TF-IDF confidence is also computed and used as a fallback so that
+    semantically adjacent skills can still receive partial credit.
     """
-    # Lookup: skill_name_lower → full LLM skill dict
-    llm_lookup: dict[str, dict] = {
-        s["skill"].lower(): s
-        for s in llm_json.get("skills", [])
-    }
+    extracted_skills = extracted_skills or []
 
-    result = {}
+    llm_lookup: dict[str, dict] = {}
+    for skill_info in llm_json.get("skills", []):
+        aliases = {
+            str(skill_info.get("skill", "")).lower().strip(),
+            str(skill_info.get("original_skill", "")).lower().strip(),
+        } - {""}
+        for alias in aliases:
+            llm_lookup[alias] = skill_info
+
+    fallback_scores: dict[str, dict] = {}
+    if skill_vectors and resume_vector is not None:
+        fallback_scores = score_all_benchmark_skills(
+            benchmark, resume_text, extracted_skills, resume_vector, skill_vectors
+        )
+
+    result: dict[str, dict] = {}
     for skill, onet_weight in benchmark.items():
         skill_lower = skill.lower()
-        llm_skill   = llm_lookup.get(skill_lower)
+        llm_skill = llm_lookup.get(skill_lower)
+        fallback = fallback_scores.get(skill, {})
+
+        proficiency = "unknown"
+        llm_confidence = 0.0
+        if llm_skill:
+            proficiency = str(llm_skill.get("proficiency", "unknown")).lower().strip()
+            multiplier = PROFICIENCY_MULTIPLIER.get(proficiency, 0.85)
+            llm_confidence = min(
+                1.0, float(llm_skill.get("confidence", 0.0)) * multiplier
+            )
+
+        final_confidence = round(
+            max(llm_confidence, float(fallback.get("confidence", 0.0))), 4
+        )
         result[skill_lower] = {
-            "confidence":  float(llm_skill["confidence"]) if llm_skill else 0.0,
+            "confidence": final_confidence,
             "onet_weight": onet_weight,
-            "proficiency": llm_skill["proficiency"]       if llm_skill else "unknown",
+            "proficiency": proficiency,
+            "tier": (
+                "strong"
+                if final_confidence >= STRONG_THRESHOLD
+                else "partial"
+                if final_confidence > 0.0
+                else fallback.get("tier", "weak")
+            ),
+            "weighted_confidence": round(final_confidence * onet_weight, 4),
         }
     return result
 
-
-# ── Core evaluator ────────────────────────────────────────────────────────────
 
 def evaluate_candidate(
     candidate_row: pd.Series,
@@ -156,27 +175,21 @@ def evaluate_candidate(
     ----------
     candidate_row : pd.Series with Resume_str, Extracted_Skills, Category, ID
     vectorizer    : fitted TF-IDF vectorizer
-    skill_vectors : pre-computed skill TF-IDF vectors (used as fallback
-                    confidence source when llm_json is not provided)
+    skill_vectors : pre-computed skill TF-IDF vectors
     category      : override for the Category field in candidate_row
-    resume_col    : column name for resume text (default 'Resume_str')
-    jd_skills     : skills extracted from the job description PDF;
-                    when provided, benchmark weights are boosted for these skills
-    llm_json      : output of extract_all_skills() — when provided, LLM
-                    confidence scores are used directly instead of TF-IDF
-                    vector similarity. This is the primary confidence source
-                    for the PDF pipeline.
+    resume_col    : column name for resume text
+    jd_skills     : skills extracted from the job description
+    llm_json      : output of extract_all_skills()
     """
-    cand_id      = candidate_row.get("ID", 0)
+    cand_id = candidate_row.get("ID", 0)
     raw_category = category or candidate_row.get("Category", "UNKNOWN")
-    job_title    = resolve_job_title(str(raw_category))
-    resume_text  = str(candidate_row.get(resume_col, ""))
+    job_title = resolve_job_title(str(raw_category))
+    resume_text = str(candidate_row.get(resume_col, ""))
 
-    # ── Benchmark & JD dynamic weighting ─────────────────────────────────────
     if jd_skills:
         benchmark: dict[str, float] = {}
         for skill in jd_skills:
-            s_lower        = skill.lower()
+            s_lower = skill.lower()
             initial_weight = DEFAULT_SKILL_WEIGHTS.get(s_lower, 1.0)
             if s_lower in DEFAULT_SKILL_WEIGHTS:
                 benchmark[skill] = max(4.0, initial_weight * 1.5)
@@ -193,48 +206,49 @@ def evaluate_candidate(
 
     extracted_skills: list[str] = list(candidate_row.get("Extracted_Skills") or [])
     extracted_set = {s.lower() for s in extracted_skills}
-    cand_vec      = vectorizer.transform([resume_text])
+    cand_vec = vectorizer.transform([resume_text])
 
-    # ── Confidence scores — LLM JSON first, TF-IDF fallback ──────────────────
     if llm_json:
-        # Primary path: PDF pipeline with LLM extraction
-        confidence_scores = _build_confidence_from_llm(llm_json, benchmark)
+        confidence_scores = _build_confidence_from_llm(
+            llm_json,
+            benchmark,
+            resume_text=resume_text,
+            extracted_skills=extracted_skills,
+            resume_vector=cand_vec,
+            skill_vectors=skill_vectors,
+        )
     elif skill_vectors:
-        # Fallback: CSV / batch mode without LLM
         confidence_scores = score_all_benchmark_skills(
             benchmark, resume_text, extracted_skills, cand_vec, skill_vectors
         )
     else:
         confidence_scores = {}
 
-    # ── Split-weighted fit (hard/soft ratio) ─────────────────────────────────
     if confidence_scores:
         split_result = compute_split_weighted_fit(
             benchmark, confidence_scores, raw_category, job_title
         )
         weighted_fit = split_result["split_fit"]
-        hard_fit     = split_result["hard_fit"]
-        soft_fit     = split_result["soft_fit"]
-        ratio        = get_ratio(raw_category, job_title)
-        cat_type     = split_result["category_type"]
-        ratio_label  = split_result["ratio_label"]
+        hard_fit = split_result["hard_fit"]
+        soft_fit = split_result["soft_fit"]
+        ratio = get_ratio(raw_category, job_title)
+        cat_type = split_result["category_type"]
+        ratio_label = split_result["ratio_label"]
     else:
-        # Last resort: plain O*NET-weighted binary fit
-        total_w      = sum(benchmark.values())
-        matched_w    = sum(w for s, w in benchmark.items() if s.lower() in extracted_set)
+        total_w = sum(benchmark.values())
+        matched_w = sum(w for s, w in benchmark.items() if s.lower() in extracted_set)
         weighted_fit = matched_w / total_w if total_w > 0 else 0.0
-        hard_fit     = weighted_fit
-        soft_fit     = weighted_fit
+        hard_fit = weighted_fit
+        soft_fit = weighted_fit
         split_result = {}
-        cat_type     = get_category_type(raw_category, job_title)
-        ratio        = get_ratio(raw_category, job_title)
-        ratio_label  = ratio.label
+        cat_type = get_category_type(raw_category, job_title)
+        ratio = get_ratio(raw_category, job_title)
+        ratio_label = ratio.label
 
-    # ── Weighted cosine similarity ────────────────────────────────────────────
     if jd_skills:
         bench_words: list[str] = []
-        for s, w in benchmark.items():
-            bench_words.extend([s] * max(1, int(round(w))))
+        for skill, weight in benchmark.items():
+            bench_words.extend([skill] * max(1, int(round(weight))))
         bench_text = " ".join(bench_words)
     else:
         bench_text = build_benchmark_text(job_title, top_n=BENCHMARK_TOP_N)
@@ -245,9 +259,8 @@ def evaluate_candidate(
     except Exception:
         wt_cosine = 0.0
 
-    # ── Composite, grade, pathway ─────────────────────────────────────────────
-    composite     = (weighted_fit + wt_cosine) / 2
-    grade         = determine_grade(composite)
+    composite = 0.75 * weighted_fit + 0.25 * wt_cosine
+    grade = determine_grade(composite)
     pathway_depth = (
         "Fundamental & Comprehensive"
         if grade in FUNDAMENTAL_GRADES
@@ -257,13 +270,12 @@ def evaluate_candidate(
         WEEK_COUNT_FUNDAMENTAL if grade in FUNDAMENTAL_GRADES else WEEK_COUNT_ADVANCED
     )
 
-    # ── Gap detection ─────────────────────────────────────────────────────────
     if confidence_scores:
         gap_weights = {
             skill: weight
             for skill, weight in benchmark.items()
             if confidence_scores.get(skill.lower(), {}).get("confidence", 0.0)
-               < STRONG_THRESHOLD
+            < STRONG_THRESHOLD
         }
     else:
         gap_weights = {
@@ -273,26 +285,26 @@ def evaluate_candidate(
         }
 
     return {
-        "ID":                  cand_id,
-        "Category":            raw_category,
-        "Job_Title":           job_title,
-        "Category_Type":       cat_type,
-        "Ratio_Label":         ratio_label,
-        "Hard_Fit":            round(hard_fit, 4),
-        "Soft_Fit":            round(soft_fit, 4),
-        "Weighted_Fit":        round(weighted_fit, 4),
-        "Split_Weighted_Fit":  round(weighted_fit, 4),
-        "Weighted_Cosine":     round(wt_cosine, 4),
-        "Composite_Score":     round(composite, 4),
-        "Confidence_Scores":   confidence_scores,
-        "Split_Details":       split_result,
-        "Grade":               grade,
-        "Pathway_Depth":       pathway_depth,
-        "Duration":            week_count,
-        "Gaps":                sorted(gap_weights.keys()),
-        "Gap_Weights":         gap_weights,
-        "Extracted_Skills":    sorted(extracted_set),
-        "_cand_vec":           cand_vec,
+        "ID": cand_id,
+        "Category": raw_category,
+        "Job_Title": job_title,
+        "Category_Type": cat_type,
+        "Ratio_Label": ratio_label,
+        "Hard_Fit": round(hard_fit, 4),
+        "Soft_Fit": round(soft_fit, 4),
+        "Weighted_Fit": round(weighted_fit, 4),
+        "Split_Weighted_Fit": round(weighted_fit, 4),
+        "Weighted_Cosine": round(wt_cosine, 4),
+        "Composite_Score": round(composite, 4),
+        "Confidence_Scores": confidence_scores,
+        "Split_Details": split_result,
+        "Grade": grade,
+        "Pathway_Depth": pathway_depth,
+        "Duration": week_count,
+        "Gaps": sorted(gap_weights.keys()),
+        "Gap_Weights": gap_weights,
+        "Extracted_Skills": sorted(extracted_set),
+        "_cand_vec": cand_vec,
     }
 
 
@@ -304,17 +316,19 @@ def batch_evaluate(
     jd_skills: set[str] | list[str] | None = None,
 ) -> list[dict]:
     """
-    Evaluate all rows in a DataFrame. CSV/batch mode — no LLM JSON.
-    Uses TF-IDF skill vectors for confidence scoring.
+    Evaluate all rows in a DataFrame. CSV/batch mode uses TF-IDF confidence.
     """
     results = []
     for _, row in resume_df.iterrows():
         try:
-            row_jd_skills = row.get("JD_Skills") or jd_skills   # fix: avoid NaN ambiguity
+            row_jd_skills = row.get("JD_Skills") or jd_skills
             m = evaluate_candidate(
-                row, vectorizer, skill_vectors,
-                resume_col=resume_col, jd_skills=row_jd_skills,
-                llm_json=None,   # explicit: batch mode never uses LLM JSON
+                row,
+                vectorizer,
+                skill_vectors,
+                resume_col=resume_col,
+                jd_skills=row_jd_skills,
+                llm_json=None,
             )
             results.append(m)
         except Exception as exc:

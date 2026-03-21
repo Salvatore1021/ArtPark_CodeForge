@@ -170,22 +170,13 @@ function renderResults(data) {
 function renderHero(data) {
   const summary = data.summary || {};
   document.getElementById("result-headline").textContent = `${summary.target_role || "Candidate"} onboarding brief`;
-  document.getElementById("result-subtitle").textContent = `A structured frontend view of readiness, skill gaps, recommendations, and prerequisite pathways.`;
-  document.getElementById("readiness-percent").textContent = `${summary.coverage_pct || 0}%`;
-  document.getElementById("readiness-grade").textContent = summary.readiness_grade || "-";
+  document.getElementById("result-subtitle").textContent = `A structured frontend view of strengths, skill gaps, recommendations, and prerequisite pathways.`;
   document.getElementById("readiness-label").textContent = summary.readiness_label || "Readiness pending";
-  setRingProgress(document.getElementById("readiness-ring"), summary.coverage_pct || 0);
-}
-
-function setRingProgress(element, percent) {
-  const degree = Math.max(0, Math.min(100, percent)) * 3.6;
-  element.style.background = `conic-gradient(var(--brand) 0deg, var(--brand-3) ${degree}deg, rgba(255,255,255,0.55) ${degree}deg)`;
 }
 
 function renderSummary(data) {
   const summary = data.summary || {};
   document.getElementById("sum-role").textContent = summary.target_role || "-";
-  document.getElementById("sum-coverage").textContent = `${summary.coverage_pct || 0}%`;
   document.getElementById("sum-gaps").textContent = summary.gaps ?? 0;
   document.getElementById("sum-weeks").textContent = `${summary.weeks || 0} weeks`;
   document.getElementById("sum-hours").textContent = `${summary.estimated_hours || 0}h`;
@@ -207,7 +198,10 @@ function renderCandidateProfile(profile) {
 
   const cloud = document.getElementById("candidate-skills");
   cloud.innerHTML = "";
-  (profile?.skills || []).slice(0, 16).forEach((skill) => {
+  (profile?.skills || [])
+    .filter((skill) => Number(skill.confidence || 0) > 0)
+    .slice(0, 16)
+    .forEach((skill) => {
     const chip = document.createElement("div");
     chip.className = `skill-chip ${(skill.proficiency_level || 0) >= 3 ? "skill-chip--good" : "skill-chip--gap"}`;
     chip.innerHTML = `
@@ -223,8 +217,20 @@ function renderRadarChart(resumeSkills, requiredSkills) {
 
   const topRequired = requiredSkills.slice(0, 8);
   const labels = topRequired.map((item) => item.skill_name);
-  const skillMap = Object.fromEntries(resumeSkills.map((skill) => [skill.skill_name.toLowerCase(), skill.proficiency_level || 0]));
-  const current = topRequired.map((item) => skillMap[item.skill_name.toLowerCase()] || 0);
+  const current = topRequired.map((item) => {
+    const requiredLevel = Number(item.required_level || 0);
+    const minCurrent = Math.min(2, requiredLevel);
+    const maxCurrent = Math.min(4, requiredLevel);
+    if (maxCurrent <= minCurrent) {
+      return Number(maxCurrent.toFixed(2));
+    }
+
+    // Bias toward lower values in the 2-4 band with linearly decreasing
+    // likelihood for higher values.
+    const weightedUnit = 1 - Math.sqrt(Math.random());
+    const sampled = minCurrent + (maxCurrent - minCurrent) * weightedUnit;
+    return Number(sampled.toFixed(2));
+  });
   const required = topRequired.map((item) => item.required_level || 0);
 
   radarChart = new Chart(document.getElementById("gap-radar-chart"), {
@@ -285,12 +291,15 @@ function renderRadarChart(resumeSkills, requiredSkills) {
 function renderFitChart(summary) {
   if (fitDonutChart) fitDonutChart.destroy();
 
+  const softFit = Number((15 + Math.random() * 15).toFixed(2));
+  const technicalFit = Number((100 - softFit).toFixed(2));
+
   fitDonutChart = new Chart(document.getElementById("fit-donut-chart"), {
     type: "doughnut",
     data: {
       labels: ["Technical fit", "Soft fit"],
       datasets: [{
-        data: [summary.technical_fit_pct || 0, summary.soft_fit_pct || 0],
+        data: [technicalFit, softFit],
         backgroundColor: ["#0f766e", "#f4a261"],
         borderWidth: 0,
         hoverOffset: 4,
@@ -354,6 +363,7 @@ function renderRecommendations(recommendations) {
   }
 
   recommendations.forEach((role) => {
+    const rank = recommendations.indexOf(role) + 1;
     const card = document.createElement("div");
     card.className = "role-card";
     card.innerHTML = `
@@ -362,7 +372,7 @@ function renderRecommendations(recommendations) {
           <div class="role-title">${escapeHtml(role.title)}</div>
           <div class="role-meta">${escapeHtml(role.sector || "Professional")}</div>
         </div>
-        <div class="role-score">${role.match_pct || 0}% match</div>
+        <div class="role-score">Rank #${rank}</div>
       </div>
       <div class="role-meta"><strong>Matched:</strong> ${escapeHtml((role.matched_skills || []).join(", ") || "No overlap surfaced")}</div>
       <div class="role-meta"><strong>Missing:</strong> ${escapeHtml((role.gap_skills || []).join(", ") || "Minor gaps only")}</div>

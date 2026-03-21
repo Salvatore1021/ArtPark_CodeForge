@@ -4,7 +4,7 @@ This directory is for storing local model files, embeddings, and checkpoints.
 
 ## Current Model Architecture
 
-AURORA's intelligence comes from three model layers:
+SkillDeck's intelligence comes from three model layers:
 
 ### 1. LLM Skill Extraction (Primary)
 - **Model**: `gpt-4o-mini` (via OpenAI API)

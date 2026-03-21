@@ -3,7 +3,7 @@ version: "3.9"
 services:
   backend:
     build: .
-    container_name: aurora_backend
+    container_name: skilldeck_backend
     ports:
       - "8000:8000"
     volumes:

@@ -927,7 +927,7 @@ def run_recommend_only(resume_pdf_path: str, save: bool = True) -> None:
     _print_recommendations(recommendations)
 
 
-app = FastAPI(title="AURORA Backend", version="1.0.0")
+app = FastAPI(title="SkillDeck Backend", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

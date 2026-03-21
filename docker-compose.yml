@@ -6,7 +6,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: aurora-backend
+    container_name: skilldeck-backend
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -25,13 +25,13 @@ services:
       retries: 3
       start_period: 15s
     networks:
-      - aurora-net
+      - skilldeck-net
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: aurora-frontend
+    container_name: skilldeck-frontend
     restart: unless-stopped
     ports:
       - "80:80"
@@ -39,8 +39,8 @@ services:
       backend:
         condition: service_healthy
     networks:
-      - aurora-net
+      - skilldeck-net
 
 networks:
-  aurora-net:
+  skilldeck-net:
     driver: bridge

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AURORA - Adaptive Onboarding Studio</title>
+  <title>SkillDeck - Adaptive Onboarding Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
@@ -16,9 +16,14 @@
   <header class="topbar">
     <div class="container topbar-inner">
       <div class="brand">
-        <div class="brand-mark">A</div>
+        <div class="brand-mark" aria-hidden="true">
+          <span class="brand-mark__core"></span>
+          <span class="brand-mark__node brand-mark__node--one"></span>
+          <span class="brand-mark__node brand-mark__node--two"></span>
+          <span class="brand-mark__node brand-mark__node--three"></span>
+        </div>
         <div>
-          <div class="brand-title">AURORA</div>
+          <div class="brand-title">SkillDeck</div>
           <div class="brand-sub">Adaptive Onboarding Studio</div>
         </div>
       </div>
@@ -124,22 +129,16 @@
       <div class="container">
         <div class="results-hero glass reveal">
           <div>
-            <div class="eyebrow">Step 2</div>
             <h2 id="result-headline">Interactive onboarding brief</h2>
             <p id="result-subtitle">Your analysis appears here once processing finishes.</p>
           </div>
           <div class="readiness-spotlight" id="readiness-spotlight">
-            <div class="readiness-ring" id="readiness-ring"><span id="readiness-percent">0%</span></div>
-            <div>
-              <div class="readiness-grade" id="readiness-grade">-</div>
-              <div class="readiness-label" id="readiness-label">Waiting for analysis</div>
-            </div>
+            <div class="readiness-label" id="readiness-label">Waiting for analysis</div>
           </div>
         </div>
 
         <div class="summary-grid reveal" id="summary-grid">
           <div class="stat-card glass"><span>Target role</span><strong id="sum-role">-</strong></div>
-          <div class="stat-card glass"><span>Coverage</span><strong id="sum-coverage">0%</strong></div>
           <div class="stat-card glass"><span>Skill gaps</span><strong id="sum-gaps">0</strong></div>
           <div class="stat-card glass"><span>Roadmap</span><strong id="sum-weeks">0 weeks</strong></div>
           <div class="stat-card glass"><span>Learning time</span><strong id="sum-hours">0h</strong></div>

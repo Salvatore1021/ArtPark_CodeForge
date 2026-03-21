@@ -90,13 +90,56 @@ canvas { display: block; }
   width: 44px;
   height: 44px;
   border-radius: 14px;
-  display: grid;
-  place-items: center;
-  font-family: var(--font-display);
-  font-weight: 700;
-  color: white;
+  position: relative;
+  overflow: hidden;
   background: linear-gradient(135deg, var(--brand), var(--accent));
   box-shadow: 0 16px 28px rgba(15, 118, 110, 0.28);
+}
+
+.brand-mark::before {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(255,255,255,0.3), transparent 38%),
+    linear-gradient(145deg, rgba(255,255,255,0.08), rgba(255,255,255,0));
+}
+
+.brand-mark__core {
+  position: absolute;
+  inset: 13px 11px 11px 13px;
+  border-radius: 10px 14px 12px 14px;
+  background: linear-gradient(160deg, rgba(255,255,255,0.92), rgba(255,255,255,0.55));
+  clip-path: polygon(0 24%, 64% 24%, 100% 0, 100% 48%, 36% 48%, 36% 72%, 100% 72%, 100% 100%, 0 100%);
+  z-index: 1;
+}
+
+.brand-mark__node {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  z-index: 2;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.12);
+}
+
+.brand-mark__node--one {
+  top: 9px;
+  right: 8px;
+  background: #f4a261;
+}
+
+.brand-mark__node--two {
+  bottom: 8px;
+  right: 8px;
+  background: #e76f51;
+}
+
+.brand-mark__node--three {
+  top: 18px;
+  left: 8px;
+  background: #ffffff;
 }
 
 .brand-title {
@@ -503,18 +546,8 @@ canvas { display: block; }
 .readiness-spotlight {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  justify-content: flex-end;
   min-width: 280px;
-}
-
-.readiness-ring {
-  width: 124px;
-  background: conic-gradient(var(--brand) 0deg, var(--brand-3) 0deg, rgba(255,255,255,0.5) 0deg);
-}
-
-.readiness-grade {
-  font-family: var(--font-display);
-  font-size: 2rem;
 }
 .readiness-label { color: var(--muted); }
 
@@ -526,7 +559,7 @@ canvas { display: block; }
   margin-top: 1.2rem;
 }
 
-.summary-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.summary-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .dashboard-grid { grid-template-columns: 1.1fr 1fr 0.85fr; align-items: stretch; }
 .insight-grid { grid-template-columns: 1fr 1fr; }
 
