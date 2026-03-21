@@ -11,7 +11,7 @@ If no LLM backend is reachable, extraction raises a RuntimeError.
 
 import re
 from collections import defaultdict, Counter
-from llm_extractor import extract_skills_llm
+from llm_extractor import extract_skills_llm, map_to_taxonomy
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -92,25 +92,13 @@ def _classify_domains(skills: list) -> list:
 # MAIN PIPELINE
 # ════════════════════════════════════════════════════════════════════
 
-def extract_all_skills(parsed_resume: dict) -> dict:
+def extract_all_skills(parsed_resume: dict,
+                       taxonomy_skills: list = None) -> dict:
     """
     Extract skills from a parsed resume using the LLM.
+    If taxonomy_skills is provided, maps extracted skills to the taxonomy.
 
     Raises RuntimeError if no LLM backend is reachable.
-
-    Returns
-    -------
-    {
-        skills             : list[dict] — all skills with full metadata
-        skills_by_category : dict       — { category: [skill, ...] }
-        experience_info    : dict       — { total_years, seniority, ... }
-        domains            : list[str]  — top domains by skill count
-        languages          : list[str]
-        confidence_scores  : dict       — { skill: float }
-        reasoning_trace    : list[dict] — full audit log
-        backend_used       : str
-        model_used         : str
-    }
     """
     raw_text   = parsed_resume.get("raw_text", "")
     experience = parsed_resume.get("experience", [])
@@ -150,7 +138,29 @@ def extract_all_skills(parsed_resume: dict) -> dict:
         if s.get("reasoning", "").strip().lower() not in INVALID_REASONING
     ]
 
-    # ── Dedup ─────────────────────────────────────────────────────────
+    # ── Taxonomy mapping (optional) ───────────────────────────────────────
+    if taxonomy_skills:
+        skill_lookup = {s.lower().strip(): s for s in taxonomy_skills}
+        mapping      = map_to_taxonomy(skills, taxonomy_skills)
+        mapped = []
+        for s in skills:
+            matched = mapping.get(s["skill"])
+            if matched:
+                canonical = skill_lookup.get(matched.lower().strip(), matched)
+                if canonical in taxonomy_skills:
+                    mapped.append({
+                        **s,
+                        "original_skill": s["skill"],
+                        "skill":          canonical,
+                        "category":       s["category"],
+                    })
+                else:
+                    print(f"  [taxonomy] removed '{s['skill']}' (no match)")
+            else:
+                print(f"  [taxonomy] removed '{s['skill']}' (no match)")
+        skills = mapped
+
+    # ── Dedup ─────────────────────────────────────────────────────────────
     seen, deduped = set(), []
     for s in skills:
         if s["skill"] not in seen:
