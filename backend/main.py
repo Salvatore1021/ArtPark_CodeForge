@@ -44,6 +44,44 @@ from role_recommender import recommend_roles
 from report_exporter import export_all
 from skill_classifier import classify_skill, split_benchmark, get_category_type
 
+import os
+import importlib.util
+
+def load_taxonomy_skills() -> list[str]:
+    taxonomy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enhanced_taxonomy.py")
+    if not os.path.exists(taxonomy_path):
+        print("  [taxonomy] enhanced_taxonomy.py not found — skipping mapping")
+        return []
+    spec = importlib.util.spec_from_file_location("enhanced_taxonomy", taxonomy_path)
+    if spec is None or spec.loader is None:
+        print("  [taxonomy] Failed to load enhanced_taxonomy.py — skipping mapping")
+        return []
+
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        print(f"  [taxonomy] Failed to import enhanced_taxonomy.py: {exc}")
+        return []
+
+    taxonomy_data = getattr(mod, "ENHANCED_TAXONOMY_DATA", None)
+    if not isinstance(taxonomy_data, dict):
+        print("  [taxonomy] ENHANCED_TAXONOMY_DATA missing or invalid — skipping mapping")
+        return []
+
+    skill_set = set()
+    for domain, roles in taxonomy_data.items():
+        for role, data in roles.items():
+            if not isinstance(data, dict): continue
+            for key, val in data.items():
+                if key == "WEIGHTS" and isinstance(val, dict):
+                    for s in val:
+                        if "\n" not in s and len(s) > 1: skill_set.add(s)
+                elif key.startswith("Unnamed") and isinstance(val, list):
+                    for s in val:
+                        if "\n" not in s and len(s) > 1: skill_set.add(s)
+    print(f"  [taxonomy] Loaded {len(skill_set)} skills")
+    return sorted(skill_set)
 
 
 # ── Readiness description ─────────────────────────────────────────────────────
@@ -264,7 +302,8 @@ def _run_analysis_for_api(
     llm_output = None
     extracted_skills = []
     try:
-        llm_output = extract_all_skills(profile)
+        taxonomy_skills = load_taxonomy_skills()
+        llm_output = extract_all_skills(profile, taxonomy_skills=taxonomy_skills or None)
         extracted_skills = [s["skill"] for s in llm_output.get("skills", [])]
     except Exception:
         extracted_skills = extract_skills(resume_text, FULL_SKILL_LIBRARY)

@@ -63,7 +63,7 @@ function handleFileSelect(file, type) {
 }
 
 function checkAnalyzeReady() {
-  analyzeBtn.disabled = !(resumeFile && jdFile);
+  analyzeBtn.disabled = !resumeFile;
 }
 
 // Input change events
@@ -124,7 +124,7 @@ function stopLoadingAnimation() {
 // API call
 // ============================================================
 analyzeBtn.addEventListener("click", async () => {
-  if (!resumeFile || !jdFile) return;
+  if (!resumeFile) return;
 
   // Show loading
   loadingOverlay.hidden = false;
@@ -134,7 +134,9 @@ analyzeBtn.addEventListener("click", async () => {
   try {
     const formData = new FormData();
     formData.append("resume", resumeFile);
-    formData.append("job_description", jdFile);
+    if (jdFile) {
+      formData.append("job_description", jdFile);
+    }
 
     // Add default category required by the new visual endpoint
     formData.append("category", "ENGINEER");
