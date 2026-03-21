@@ -1,62 +1,70 @@
-# Models Directory
+# SkillDeck
 
-This directory is for storing local model files, embeddings, and checkpoints.
+An AI-driven skill analysis tool. Upload a resume and an optional job description — SkillDeck extracts your skills, scores you against a job benchmark, identifies gaps, and builds a prioritised learning roadmap.
 
-## Current Model Architecture
+---
 
-SkillDeck's intelligence comes from three model layers:
+## How It Works
 
-### 1. LLM Skill Extraction (Primary)
-- **Model**: `gpt-4o-mini` (via OpenAI API)
-- **Task**: Structured JSON extraction of skills from unstructured resume/JD text
-- **Why**: Superior entity extraction vs regex; handles abbreviations, context, proficiency signals
-- **Config**: Set `OPENAI_MODEL` in `.env` to swap models
+1. **Upload** a resume (PDF or DOCX) and optionally a job description PDF.
+2. **Skills are extracted** from both documents using an LLM (OpenAI or local Ollama). If neither is configured, it falls back to regex matching against a built-in skill taxonomy — no API key required.
+3. **Gaps are identified** by comparing your skills against the job benchmark, each scored by how critical the missing skill is.
+4. **A learning roadmap** is generated from a curated course catalog, ordered by prerequisites into time-bounded phases.
+5. **Results are displayed** in the browser — a skill radar chart, gap table, role recommendations, and a phase-grouped course pathway.
 
-### 2. Regex + Taxonomy Fallback (No API key needed)
-- **Model**: Rule-based pattern matching over `data/skill_taxonomy.json`
-- **Task**: Alias resolution and skill normalization without API dependency
-- **Why**: Zero-latency, zero-cost fallback; works offline for demos
+---
 
-### 3. Bayesian Knowledge Tracing (BKT)
-- **Model**: Hidden Markov Model with 4 parameters (p_init, p_learn, p_slip, p_guess)
-- **Location**: `backend/knowledge_tracing.py`
-- **Task**: Estimate per-skill mastery probability from performance history
-- **Why**: Principled probabilistic model; original implementation; proven in ITS literature (Corbett & Anderson 1994)
+## Running the Project
 
-## Swapping the LLM
-
-To use a different LLM, update `.env`:
+### Option A — Docker (Recommended)
 
 ```bash
-# Anthropic Claude via OpenAI-compatible proxy
-OPENAI_API_KEY=your-anthropic-key
-OPENAI_MODEL=claude-3-haiku-20240307
-OPENAI_BASE_URL=https://api.anthropic.com/v1
+cp .env.example .env
+# Add your OPENAI_API_KEY to .env (optional)
 
-# Local Ollama (Mistral/Llama3)
-OPENAI_API_KEY=ollama
-OPENAI_MODEL=mistral
-OPENAI_BASE_URL=http://localhost:11434/v1
+docker compose up --build
 ```
 
-## Adding Embedding-Based Skill Matching (Future Enhancement)
+| Service | URL |
+|---|---|
+| Frontend | http://localhost |
+| Backend API | http://localhost:8000 |
+| API Docs | http://localhost:8000/docs |
 
-To improve skill matching beyond exact/alias lookup, you can add a sentence embedding model:
+### Option B — Local
 
-```python
-# Example: all-MiniLM-L6-v2 from sentence-transformers
-from sentence_transformers import SentenceTransformer
-model = SentenceTransformer('all-MiniLM-L6-v2')
-# Save embeddings for all catalog skills once, then cosine-match at inference
+**1. Install dependencies**
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt
 ```
 
-Place any `.bin`, `.pt`, or `.pkl` files here. They are gitignored by default.
+**2. Start the backend**
 
-## Fitting BKT Parameters from Real Data
+```bash
+cd backend
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
 
-If you collect performance logs from learners, you can fit per-skill BKT parameters
-using maximum likelihood estimation. A starter EM fitting loop is available in
-`notebooks/02_bkt_parameter_fitting.ipynb` (to be created).
+**3. Serve the frontend**
 
-**Reference:**  
-Corbett, A. T., & Anderson, J. R. (1994). Knowledge Tracing: Modeling the Acquisition of Procedural Knowledge. *User Modeling and User-Adapted Interaction*, 4(4), 253–278.
+```bash
+cd frontend
+python3 -m http.server 3000
+```
+
+Open `http://localhost:3000`.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env`. The only variable that matters:
+
+```env
+OPENAI_API_KEY=sk-your-key-here   # optional — works without it
+OPENAI_MODEL=gpt-4o-mini
+```
+
+To use a local LLM instead, install [Ollama](https://ollama.com), run `ollama pull llama3.2`, and start `ollama serve`. SkillDeck will detect it automatically.
