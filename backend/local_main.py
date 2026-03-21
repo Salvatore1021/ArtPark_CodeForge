@@ -4,8 +4,9 @@ main.py
 Entry point for the resume skill extraction pipeline.
 
 Usage:
-    python main.py resume1.html resume2.html ...
-    LLM_BACKEND=groq python main.py resume.html
+    python main.py resume.pdf
+    python main.py resume.pdf enhanced_taxonomy.py
+    python main.py resume1.pdf resume2.pdf --taxonomy enhanced_taxonomy.py
 """
 
 import json
@@ -20,7 +21,33 @@ def load_resume(filepath: str) -> str:
         return f.read()
 
 
-def process_resumes(filepaths: list) -> list:
+def load_taxonomy_skills(taxonomy_path: str) -> list:
+    """Load all unique skill names from the taxonomy file."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("enhanced_taxonomy", taxonomy_path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    taxonomy_data = mod.ENHANCED_TAXONOMY_DATA
+
+    skill_set = set()
+    for domain, roles in taxonomy_data.items():
+        for role, data in roles.items():
+            if not isinstance(data, dict):
+                continue
+            for key, val in data.items():
+                if key == "WEIGHTS" and isinstance(val, dict):
+                    for s in val:
+                        if "\n" not in s and len(s) > 1:
+                            skill_set.add(s)
+                elif key.startswith("Unnamed") and isinstance(val, list):
+                    for s in val:
+                        if "\n" not in s and len(s) > 1:
+                            skill_set.add(s)
+    print(f"  [taxonomy] Loaded {len(skill_set)} skills from {os.path.basename(taxonomy_path)}")
+    return sorted(skill_set)
+
+
+def process_resumes(filepaths: list, taxonomy_skills: list = None) -> list:
     profiles = []
     for fp in filepaths:
         if fp.lower().endswith(".pdf"):
@@ -37,7 +64,10 @@ def process_resumes(filepaths: list) -> list:
                     "accomplishments": [], "additional": "",
                 }
 
-        extraction = extract_all_skills(parsed_resume=parsed)
+        extraction = extract_all_skills(
+            parsed_resume=parsed,
+            taxonomy_skills=taxonomy_skills,
+        )
         profiles.append({
             "source_file": os.path.basename(fp),
             **extraction,
@@ -99,14 +129,37 @@ def export_json(profiles: list, path: str = None):
 
 
 if __name__ == "__main__":
-    files = sys.argv[1:] if len(sys.argv) > 1 else []
+    args = sys.argv[1:]
 
-    if not files:
-        print("Usage: python main.py resume1.html resume2.html ...\n")
+    # Parse --taxonomy flag
+    taxonomy_path  = None
+    resume_files   = []
+    skip_next      = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--taxonomy" and i + 1 < len(args):
+            taxonomy_path = args[i + 1]
+            skip_next     = True
+        elif arg.endswith(".py") and os.path.exists(arg):
+            taxonomy_path = arg
+        else:
+            resume_files.append(arg)
+
+    if not resume_files:
+        print("Usage: python main.py resume.pdf")
+        print("       python main.py resume.pdf enhanced_taxonomy.py")
+        print("       python main.py resume1.pdf resume2.pdf --taxonomy enhanced_taxonomy.py")
         sys.exit(1)
 
+    # Load taxonomy if provided
+    taxonomy_skills = None
+    if taxonomy_path:
+        taxonomy_skills = load_taxonomy_skills(taxonomy_path)
+
     try:
-        profiles = process_resumes(files)
+        profiles = process_resumes(resume_files, taxonomy_skills)
     except RuntimeError as e:
         print(f"\n  ERROR: {e}")
         sys.exit(1)
