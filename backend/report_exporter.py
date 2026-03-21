@@ -83,7 +83,7 @@ def export_json(
             [{k: v for k, v in r.items()} for r in recommendations]
         )
 
-    path.write_text(json.dumps(record, indent=2))
+    path.write_text(json.dumps(_sanitise(record), indent=2), encoding="utf-8")
     return path
 
 
@@ -195,7 +195,7 @@ def export_text_report(
             )
 
     lines += ["", "=" * 70, ""]
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
     return path
 
 

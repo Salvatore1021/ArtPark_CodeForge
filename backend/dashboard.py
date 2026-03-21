@@ -15,6 +15,8 @@ Panels
 from __future__ import annotations
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.gridspec as gridspec
@@ -478,7 +480,7 @@ def generate_dashboard(
     if save_path:
         fig.savefig(str(save_path), dpi=150, bbox_inches="tight",
                     facecolor="white", edgecolor="none")
-        print(f"\n  Visual dashboard saved → {save_path}")
+        print(f"\n  Visual dashboard saved -> {save_path}")
 
     if show:
         plt.show()

@@ -22,7 +22,13 @@ import pandas as pd
 from config import RESUME_CSV_PATH, JOB_DESC_PDF_PATH, OUTPUT_DIR
 from taxonomy_adapter import list_sectors, list_jobs, find_job_title, build_weighted_benchmark_text
 from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
-from skill_extractor import FULL_SKILL_LIBRARY, extract_all_skills, build_and_fit_vectorizer, precompute_skill_vectors
+from skill_extractor import (
+    FULL_SKILL_LIBRARY,
+    extract_all_skills,
+    extract_skills,
+    build_and_fit_vectorizer,
+    precompute_skill_vectors,
+)
 from dependency_graph import build_skill_dependency_graph
 from candidate_evaluator import evaluate_candidate, batch_evaluate
 from gap_prioritizer import prioritize_gaps
@@ -55,19 +61,34 @@ def _importance_label(weight: float) -> str:
 
 def _progress_bar(score: float, width: int = 20) -> str:
     filled = round(score * width)
-    return "█" * filled + "░" * (width - filled)
+    return "#" * filled + "-" * (width - filled)
 
 
 # ── Pretty print helpers ──────────────────────────────────────────────────────
 
 def _section(title: str) -> None:
-    print(f"\n{'═'*62}")
+    print(f"\n{'='*62}")
     print(f"  {title}")
-    print(f"{'═'*62}")
+    print(f"{'='*62}")
 
 
 def _line() -> None:
-    print(f"  {'─'*58}")
+    print(f"  {'-'*58}")
+
+
+def _prepare_vectorizer(
+    resume_df: pd.DataFrame,
+    job_text: str = "",
+    extra_benchmark_texts: list[str] | None = None,
+):
+    vectorizer = build_and_fit_vectorizer(
+        resume_df,
+        job_description_text=job_text,
+        skill_library=FULL_SKILL_LIBRARY,
+        extra_benchmark_texts=extra_benchmark_texts,
+    )
+    skill_vectors = precompute_skill_vectors(vectorizer, FULL_SKILL_LIBRARY)
+    return vectorizer, skill_vectors
 
 
 # ── Core display functions ────────────────────────────────────────────────────
@@ -137,10 +158,9 @@ def _print_skills(metrics: dict, job_title: str) -> None:
     _section("SKILLS IDENTIFIED IN YOUR CV")
 
     from skill_classifier import classify_skill
+    extracted    = sorted(metrics.get("Extracted_Skills", []))
     tech_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "hard"])
     soft_skills = sorted([s for s in extracted if classify_skill(s, job_title) == "soft"])
-
-    extracted    = sorted(metrics.get("Extracted_Skills", []))
     conf_scores  = metrics.get("Confidence_Scores", {})
     hard_bench, soft_bench = split_benchmark(
         metrics.get("Gap_Weights", {}) | {
@@ -151,7 +171,7 @@ def _print_skills(metrics: dict, job_title: str) -> None:
 
     print(f"  Total skills found  :  {len(extracted)}")
     print()
-    if tech_skills:
+    if hard_bench:
         # Wrap into lines of ~55 chars
         line, lines = "", []
         for s in tech_skills:
@@ -162,12 +182,13 @@ def _print_skills(metrics: dict, job_title: str) -> None:
             else:
                 line += chunk
         if line: lines.append(line)
-        print(f"  Technical Skills  :  {lines[0]}")
-        for l in lines[1:]:
-            print(f"                     {l}")
+        if lines:
+            print(f"  Technical Skills  :  {lines[0]}")
+            for l in lines[1:]:
+                print(f"                     {l}")
 
     print()
-    if soft_skills:
+    if soft_bench:
         line, lines = "", []
         for s in soft_skills:
             chunk = (", " if line else "") + s.title()
@@ -177,9 +198,10 @@ def _print_skills(metrics: dict, job_title: str) -> None:
             else:
                 line += chunk
         if line: lines.append(line)
-        print(f"  Soft / People     :  {lines[0]}")
-        for l in lines[1:]:
-            print(f"                     {l}")
+        if lines:
+            print(f"  Soft / People     :  {lines[0]}")
+            for l in lines[1:]:
+                print(f"                     {l}")
 
 
 def _print_skill_gaps(metrics: dict) -> None:
@@ -241,7 +263,7 @@ def _print_learning_pathway(metrics: dict, roadmap_df: pd.DataFrame) -> None:
         if len(obj) > 38:
             obj = obj[:36] + ".."
         print(f"  {row['Week']:<8} {skill:<32} {obj}")
-        print(f"  {'':<8} {'':32} ✓ {success}")
+        print(f"  {'':<8} {'':32} - {success}")
         print()
 
 
@@ -278,14 +300,20 @@ def _run_pipeline(
  
     # ── Prioritise gaps ───────────────────────────────────────────────────────
     prio_gaps = prioritize_gaps(
-        metrics["Gaps"], metrics["Gap_Weights"], cand_vec, skill_vectors, graph,
+        metrics["Gaps"], metrics["Gap_Weights"], graph, cand_vec, skill_vectors,
         confidence_scores=metrics.get("Confidence_Scores"),
     )
     metrics["Prioritized_Gaps"] = prio_gaps
  
     # ── Role recommendations ──────────────────────────────────────────────────
     resume_text     = str(cand_series.get("Resume_str", ""))
-    recommendations = recommend_roles(["Extracted_Skills"], top_n=3, min_match_count=1)
+    recommendations = recommend_roles(
+        resume_text,
+        vectorizer,
+        top_n=3,
+        min_match_count=1,
+        candidate_id=metrics["ID"],
+    )
  
     # ── Roadmap ───────────────────────────────────────────────────────────────
     roadmap_df = build_roadmap(metrics)
@@ -297,9 +325,9 @@ def _run_pipeline(
     raw_cat   = category or str(cand_series.get("Category", ""))
  
     print("\n")
-    print("█" * 62)
+    print("=" * 62)
     print("  CANDIDATE ONBOARDING REPORT")
-    print("█" * 62)
+    print("=" * 62)
  
     _print_candidate_profile(profile, cand_id, raw_cat, job_title)
     _print_readiness(metrics)
@@ -317,7 +345,7 @@ def _run_pipeline(
     generate_dashboard(
         metrics, graph, recommendations,
         profile=profile,
-        save_path=out_png, show=True,
+        save_path=out_png, show=False,
     )
  
     paths = export_all(
@@ -354,14 +382,6 @@ def run_single_pdf(
     resume_pdf_path, job_title,
     job_pdf_path, save=True,
 ) -> None:
-    from pathlib import Path
-    from resume_parser import extract_text_from_pdf, parse_resume_pdf, resume_profile_to_dataframe_row
-    from skill_extractor import extract_all_skills, extract_skills, build_and_fit_vectorizer, precompute_skill_vectors, FULL_SKILL_LIBRARY
-    from taxonomy_adapter import build_weighted_benchmark_text
-    from dependency_graph import build_skill_dependency_graph
- 
-    import pandas as pd
- 
     # Step 1: parse PDF → structured dict
     profile  = parse_resume_pdf(resume_pdf_path)
     row_dict = resume_profile_to_dataframe_row(profile)
@@ -371,7 +391,13 @@ def run_single_pdf(
     llm_output = extract_all_skills(profile)
  
     # Step 3: bridge LLM JSON → evaluator-compatible Series
-    cand_series = _llm_result_to_series(llm_output, row_dict, job_title)
+    cand_series = _llm_result_to_series(
+        llm_output,
+        profile["full_text"],
+        profile,
+        job_title,
+        row_dict,
+    )
  
     # Step 4: build TF-IDF vectorizer (still needed for cosine similarity)
     pdf_df   = pd.DataFrame([{
@@ -381,7 +407,11 @@ def run_single_pdf(
     }])
     job_text  = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
- 
+    vec, svecs = _prepare_vectorizer(
+        pdf_df,
+        job_text,
+        [build_weighted_benchmark_text(job_title)],
+    )
     graph = build_skill_dependency_graph()
  
     # Steps 5–6: job matching → gap analysis → roadmap
@@ -415,6 +445,7 @@ def run_single_csv(
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
 
     extra    = [build_weighted_benchmark_text(resolved)]
+    vec, svecs = _prepare_vectorizer(df, job_text, extra)
     graph    = build_skill_dependency_graph()
 
     _run_pipeline(
@@ -433,7 +464,7 @@ def run_batch(csv_path: str, job_pdf_path: str) -> None:
     job_text = extract_text_from_pdf(job_pdf_path) if Path(job_pdf_path).exists() else ""
     jd_skills = extract_skills(job_text, FULL_SKILL_LIBRARY) if job_text else None
     
-    vec, svecs = _quick_vectorizer(df, job_text)
+    vec, svecs = _prepare_vectorizer(df, job_text)
 
     all_metrics = batch_evaluate(df, vec, svecs, jd_skills=jd_skills)
     rows = [{
@@ -453,6 +484,23 @@ def run_batch(csv_path: str, job_pdf_path: str) -> None:
     print(pd.DataFrame(rows).to_string(index=False))
     print(f"\nResults saved to {out}")
 
+
+def run_recommend_only(resume_pdf_path: str, save: bool = True) -> None:
+    profile = parse_resume_pdf(resume_pdf_path)
+    resume_text = profile.get("full_text", "")
+    row_dict = resume_profile_to_dataframe_row(profile)
+    pdf_df = pd.DataFrame([row_dict])
+    vec, _ = _prepare_vectorizer(pdf_df)
+
+    recommendations = recommend_roles(
+        resume_text,
+        vec,
+        top_n=5,
+        min_match_count=1,
+        candidate_id=row_dict["ID"],
+    )
+    _print_recommendations(recommendations)
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -469,6 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Target job title e.g. 'Machine Learning', 'Accountants and Auditors'")
     p.add_argument("--job",          type=str,  default=JOB_DESC_PDF_PATH)
     p.add_argument("--batch",        action="store_true", help="Evaluate all candidates in CSV")
+    p.add_argument("--recommend",    action="store_true", help="Only show role recommendations for a PDF resume")
     p.add_argument("--no_save",      action="store_true", help="Don't save dashboard image")
     p.add_argument("--list_sectors", action="store_true", help="Show all available sectors")
     p.add_argument("--list_jobs",    action="store_true", help="Show available job titles")
@@ -492,7 +541,10 @@ def main() -> None:
 
     if args.resume_pdf:
         job_title = args.job_title or "Machine Learning"
-        run_single_pdf(args.resume_pdf, job_title, args.job, save=save)
+        if args.recommend:
+            run_recommend_only(args.resume_pdf, save = save)
+        else:
+            run_single_pdf(args.resume_pdf, job_title, args.job, save=save)
 
     elif args.batch:
         run_batch(args.csv, args.job)

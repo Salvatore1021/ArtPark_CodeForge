@@ -24,6 +24,8 @@ def prioritize_gaps(
     gaps: list[str],
     gap_weights: dict[str, float],
     graph: nx.DiGraph,
+    resume_vector=None,
+    skill_vectors: dict | None = None,
     confidence_scores: dict | None = None,
 ) -> list[dict]:
     """
@@ -38,8 +40,8 @@ def prioritize_gaps(
     ----------
     gaps              : list of skill strings the candidate is missing / weak
     gap_weights       : {skill: onet_weight}
-    resume_vector     : candidate TF-IDF sparse vector
-    skill_vectors     : pre-computed skill TF-IDF vectors
+    resume_vector     : candidate TF-IDF sparse vector (optional)
+    skill_vectors     : pre-computed skill TF-IDF vectors (optional)
     graph             : skill dependency DAG
     confidence_scores : per-skill confidence from skill_confidence module (optional)
     """
@@ -48,12 +50,21 @@ def prioritize_gaps(
         level  = get_skill_level(graph, gap.lower())
         onet_w = gap_weights.get(gap, 1.0)
 
+        sim = 0.0
+        skill_vec = (skill_vectors or {}).get(gap.lower())
+        if resume_vector is not None and skill_vec is not None:
+            try:
+                sim = float(cosine_similarity(resume_vector, skill_vec)[0][0])
+                if np.isnan(sim):
+                    sim = 0.0
+            except Exception:
+                sim = 0.0
         # Gap score: lower = candidate knows less about this skill
         if confidence_scores and gap.lower() in confidence_scores:
-            conf       = confidence_scores[gap.lower()]["confidence"]
-            gap_score  = round(1.0 - conf, 4)   # 1 = no knowledge, 0 = near-strong
-
-        sim = calculate_robust_similarity(resume_vector, gap, skill_vectors)
+            gap_score  = round(1.0 - confidence_scores[gap.lower()]["confidence"], 4)   # 1 = no knowledge, 0 = near-strong
+        else:
+            gap_score  = round(sim, 4)  # fallback to cosine similarity if no confidence data
+    
         records.append({
             "Skill":       gap,
             "Level":       level,

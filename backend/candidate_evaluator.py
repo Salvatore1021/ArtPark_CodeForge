@@ -239,8 +239,14 @@ def evaluate_candidate(
     else:
         bench_text = build_benchmark_text(job_title, top_n=BENCHMARK_TOP_N)
 
+    try:
+        bench_vec = vectorizer.transform([bench_text])
+        wt_cosine = float(cosine_similarity(cand_vec, bench_vec)[0][0])
+    except Exception:
+        wt_cosine = 0.0
+
     # ── Composite, grade, pathway ─────────────────────────────────────────────
-    composite     = weighted_fit
+    composite     = (weighted_fit + wt_cosine) / 2
     grade         = determine_grade(composite)
     pathway_depth = (
         "Fundamental & Comprehensive"
@@ -274,8 +280,8 @@ def evaluate_candidate(
         "Ratio_Label":         ratio_label,
         "Hard_Fit":            round(hard_fit, 4),
         "Soft_Fit":            round(soft_fit, 4),
-        "Split_Weighted_Fit":  round(weighted_fit, 4),
         "Weighted_Fit":        round(weighted_fit, 4),
+        "Split_Weighted_Fit":  round(weighted_fit, 4),
         "Weighted_Cosine":     round(wt_cosine, 4),
         "Composite_Score":     round(composite, 4),
         "Confidence_Scores":   confidence_scores,
@@ -286,6 +292,7 @@ def evaluate_candidate(
         "Gaps":                sorted(gap_weights.keys()),
         "Gap_Weights":         gap_weights,
         "Extracted_Skills":    sorted(extracted_set),
+        "_cand_vec":           cand_vec,
     }
 
 
